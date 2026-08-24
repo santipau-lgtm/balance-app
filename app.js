@@ -39,7 +39,10 @@ const DEFAULT_SPORTS = ["Caminar", "Correr", "Bicicleta", "Gimnasio/Fuerza", "F�
 const LUNCH_OPTS = [{v:"ok",label:"OK",score:100},{v:"regular",label:"Regular",score:50},{v:"bad",label:"No adecuado",score:0}];
 const DINNER_OPTS = [{v:"light",label:"Liviana",score:100},{v:"normal",label:"Normal",score:50},{v:"excessive",label:"Excesiva",score:0}];
 const INTENSITY_OPTS = ["Baja","Media","Alta"];
-const COLORS = { food:"#E8A33D", sport:"#2FB8A0", physio:"#6C8CFF", weight:"#E8654A", bad:"#E05B4F" };
+const HYDRATION_OPTS = [{v:"good",label:"Buena",score:100},{v:"regular",label:"Regular",score:50},{v:"low",label:"Insuficiente",score:0}];
+const SLEEP_OPTS = [{v:"good",label:"Bien",score:100},{v:"regular",label:"Regular",score:50},{v:"bad",label:"Mal",score:0}];
+const PAIN_AREA_OPTS = ["Cabeza","Espalda","Cuello","Articulaciones","Muscular","Otro"].map(a=>({v:a,label:a}));
+const COLORS = { food:"#E8A33D", sport:"#2FB8A0", physio:"#6C8CFF", weight:"#E8654A", bad:"#E05B4F", neutral:"#8B7FD6" };
 
 /* -------------------------------- helpers -------------------------------- */
 const pad = (n) => String(n).padStart(2,"0");
@@ -50,8 +53,27 @@ const addDays = (d,n) => { const nd=new Date(d); nd.setDate(nd.getDate()+n); ret
 const startOfWeek = (d) => { const nd=new Date(d); const day=(nd.getDay()+6)%7; nd.setDate(nd.getDate()-day); nd.setHours(0,0,0,0); return nd; };
 const weekDates = (d) => { const s=startOfWeek(d); return Array.from({length:7},(_,i)=>addDays(s,i)); };
 const fmtShort = (d) => d.toLocaleDateString("es-ES",{day:"2-digit",month:"short"});
-function emptyEntry(){ return {lunch:null,dinner:null,sports:[],physio:null,weight:null,waist:null}; }
+function emptyEntry(){ return {lunch:null,dinner:null,sports:[],physio:null,weight:null,waist:null,hydration:null,sleep:{quality:null,hours:null},pain:{has:false,area:null,intensity:null,comment:""}}; }
 function uid(){ return Math.random().toString(36).slice(2,9); }
+function ageFromBirthDate(dateStr){
+  if (!dateStr) return null;
+  const b = new Date(dateStr+"T00:00:00");
+  if (isNaN(b.getTime())) return null;
+  const t = new Date();
+  let age = t.getFullYear() - b.getFullYear();
+  const m = t.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && t.getDate() < b.getDate())) age--;
+  return age;
+}
+// General public-health reference bands for waist circumference by sex (WHO-style cutoffs).
+// Informational only — not a diagnosis, and not personalized.
+function waistReference(sex, waist){
+  if (!sex || sex==="x" || waist==null) return null;
+  const bands = sex==="m"
+    ? [{max:94,label:"dentro del rango de referencia habitual"},{max:102,label:"por encima del rango de referencia habitual"},{max:Infinity,label:"considerablemente por encima del rango de referencia habitual"}]
+    : [{max:80,label:"dentro del rango de referencia habitual"},{max:88,label:"por encima del rango de referencia habitual"},{max:Infinity,label:"considerablemente por encima del rango de referencia habitual"}];
+  return bands.find(b => waist <= b.max).label;
+}
 function movingAvg(arr,w){ return arr.map((_,i)=>{ const s=Math.max(0,i-w+1); const slice=arr.slice(s,i+1).filter(v=>v!=null); if(!slice.length) return null; return slice.reduce((a,b)=>a+b,0)/slice.length; }); }
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
@@ -94,10 +116,19 @@ function generateDemoData(days=60){
     }
     const physioDone = Math.random()<0.3;
     const physio = physioDone ? {done:true,duration:20,comment:""} : {done:false,duration:null,comment:""};
+    const hydRoll = Math.random();
+    const hydration = hydRoll<0.45?"good":hydRoll<0.8?"regular":"low";
+    const sleepRoll = Math.random();
+    const sleepQuality = sleepRoll<0.4?"good":sleepRoll<0.8?"regular":"bad";
+    const sleepHours = i%2===0 ? Math.round((5.5+Math.random()*3)*2)/2 : null;
+    const painRoll = Math.random();
+    const pain = painRoll<0.12
+      ? { has:true, area:PAIN_AREA_OPTS[Math.floor(Math.random()*(PAIN_AREA_OPTS.length-1))].v, intensity:INTENSITY_OPTS[Math.floor(Math.random()*3)], comment:"" }
+      : { has:false, area:null, intensity:null, comment:"" };
     weight += (Math.random()-0.56)*0.15;
     waist += (Math.random()-0.54)*0.1;
     entries[k] = {
-      lunch, dinner, sports: sportsArr, physio,
+      lunch, dinner, sports: sportsArr, physio, hydration, sleep:{quality:sleepQuality, hours:sleepHours}, pain,
       weight: i%3===0 ? Math.round(weight*10)/10 : null,
       waist: i%9===0 ? Math.round(waist*10)/10 : null,
     };
@@ -109,7 +140,7 @@ function defaultData(){
     isDemo: true,
     entries: generateDemoData(60),
     customSports: [],
-    config: { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null, waist:null} },
+    config: { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null, waist:null}, profile:{birthDate:null, sex:null} },
   };
 }
 
@@ -131,9 +162,10 @@ function migrateData(data){
   if (!data) return defaultData();
   const entries = {};
   Object.keys(data.entries||{}).forEach((k) => { entries[k] = migrateEntry(data.entries[k]); });
-  const config = { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null,waist:null}, ...(data.config||{}) };
+  const config = { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null,waist:null}, profile:{birthDate:null,sex:null}, ...(data.config||{}) };
   config.goals = { weight:null, waist:null, ...(data.config?.goals||{}) };
   config.weights = { food:50, sport:30, physio:20, ...(data.config?.weights||{}) };
+  config.profile = { birthDate:null, sex:null, ...(data.config?.profile||{}) };
   return { isDemo: !!data.isDemo, customSports: data.customSports||[], entries, config };
 }
 
@@ -169,10 +201,23 @@ function weekSummary(entries, dates){
   const physioSessions = days.filter(e=>e&&e.physio&&e.physio.done).length;
   const weights = days.map(e=>e&&e.weight).filter(v=>v!=null);
   const waists = days.map(e=>e&&e.waist).filter(v=>v!=null);
-  return { lunchOk, dinnerLight, sportDays, minutes, calories, physioSessions,
+  const hydrationGood = days.filter(e=>e&&e.hydration==="good").length;
+  const sleepGood = days.filter(e=>e&&e.sleep&&e.sleep.quality==="good").length;
+  const painDays = days.filter(e=>e&&e.pain&&e.pain.has).length;
+  return { lunchOk, dinnerLight, sportDays, minutes, calories, physioSessions, hydrationGood, sleepGood, painDays,
     weightDelta: weights.length>=2 ? weights[weights.length-1]-weights[0] : null,
     waistDelta: waists.length>=2 ? waists[waists.length-1]-waists[0] : null,
   };
+}
+function computeStreaks(entries){
+  const allKeys = Object.keys(entries).sort();
+  if (!allKeys.length) return { current:0, best:0 };
+  const sortedDates = allKeys.map(parseKey).sort((a,b)=>a-b);
+  let bestStreak=0, run=0;
+  for (const d of sortedDates){ const e=entries[dateKey(d)]; if(e&&e.sports&&e.sports.length>0){run++;bestStreak=Math.max(bestStreak,run);} else run=0; }
+  let curStreak=0, cd=new Date();
+  while(true){ const e=entries[dateKey(cd)]; if(e&&e.sports&&e.sports.length>0){curStreak++;cd=addDays(cd,-1);} else break; }
+  return { current: curStreak, best: bestStreak };
 }
 function generateInsights(data){
   const insights = [];
@@ -180,12 +225,9 @@ function generateInsights(data){
   const allKeys = Object.keys(entries).sort();
   if (allKeys.length < 7) return insights;
   const sortedDates = allKeys.map(parseKey).sort((a,b)=>a-b);
-  let bestStreak=0, run=0;
-  for (const d of sortedDates){ const e=entries[dateKey(d)]; if(e&&e.sports&&e.sports.length>0){run++;bestStreak=Math.max(bestStreak,run);} else run=0; }
-  let curStreak=0, cd=new Date();
-  while(true){ const e=entries[dateKey(cd)]; if(e&&e.sports&&e.sports.length>0){curStreak++;cd=addDays(cd,-1);} else break; }
-  if (curStreak>=3) insights.push(`Llevás ${curStreak} días seguidos haciendo deporte.`);
-  if (bestStreak>=4) insights.push(`Tu mejor racha de deporte fue de ${bestStreak} días consecutivos.`);
+  const streaks = computeStreaks(entries);
+  if (streaks.current>=3) insights.push(`Llevás ${streaks.current} días seguidos haciendo deporte.`);
+  if (streaks.best>=4) insights.push(`Tu mejor racha de deporte fue de ${streaks.best} días consecutivos.`);
   const now = new Date();
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const lastMonthStart = new Date(now.getFullYear(), now.getMonth()-1, 1);
@@ -205,6 +247,7 @@ function generateInsights(data){
 let DATA = null;
 let VIEW = "today";
 let CAL_CURSOR = new Date();
+let CAL_MODE = "month";
 let EVO_RANGE = 30;
 let MODAL_DATE = null;
 let saveTimer = null;
@@ -282,6 +325,26 @@ function ringSVG(score, size=56){
     </svg><div class="num">${score}</div></div>`;
 }
 
+function tripleRingSVG(adh, size=64){
+  const sw = size*0.095;
+  const rings = [
+    { score: adh.foodScore, color: COLORS.food, r: size/2 - sw*0.9 },
+    { score: adh.sportScore, color: COLORS.sport, r: size/2 - sw*2.3 },
+    { score: adh.physioScore, color: COLORS.physio, r: size/2 - sw*3.7 },
+  ];
+  const circles = rings.map((ring) => {
+    const c = 2*Math.PI*ring.r;
+    const track = `<circle cx="${size/2}" cy="${size/2}" r="${ring.r}" stroke="#8883" stroke-width="${sw}" fill="none"/>`;
+    if (ring.score == null) return track;
+    const offset = c - (Math.max(0,Math.min(100,ring.score))/100)*c;
+    return track + `<circle cx="${size/2}" cy="${size/2}" r="${ring.r}" stroke="${ring.color}" stroke-width="${sw}" fill="none"
+      stroke-dasharray="${c}" stroke-dashoffset="${offset}" stroke-linecap="round" transform="rotate(-90 ${size/2} ${size/2})"/>`;
+  }).join("");
+  return `<div class="ring-wrap" style="width:${size}px;height:${size}px;">
+    <svg width="${size}" height="${size}">${circles}</svg>
+    <div class="num">${adh.total}</div></div>`;
+}
+
 function chipRowHTML(options, value, group, colorFn, includeUnset){
   let inner = options.map(o => {
     const active = value===o.v;
@@ -319,6 +382,30 @@ function physioFieldsHTML(physio, prefix){
   </div>`;
 }
 
+function healthCardsHTML(entry, prefix){
+  const sleep = entry.sleep || { quality:null, hours:null };
+  const pain = entry.pain || { has:false, area:null, intensity:null, comment:"" };
+  return `
+    <div class="card">
+      <div class="card-head"><h3>Hidratación</h3></div>
+      ${chipRowHTML(HYDRATION_OPTS, entry.hydration, prefix+".hydration", v => v==="good"?COLORS.sport:v==="regular"?COLORS.food:COLORS.bad, true)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Sueño</h3></div>
+      ${chipRowHTML(SLEEP_OPTS, sleep.quality, prefix+".sleep.quality", v => v==="good"?COLORS.sport:v==="regular"?COLORS.food:COLORS.bad, true)}
+      <div class="num-field" style="max-width:130px;margin-top:8px;"><input type="number" inputmode="decimal" step="0.5" data-field="${prefix}.sleep.hours" value="${sleep.hours??""}" placeholder="0"/><span>hs dormidas</span></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Dolor</h3><button class="mark-btn${pain.has?" active":""}" style="${pain.has?`background:${COLORS.neutral};border-color:${COLORS.neutral};`:`border-color:${COLORS.neutral};color:${COLORS.neutral};`}" data-toggle-pain="${prefix}">${pain.has?"Sí":"Marcar"}</button></div>
+      ${pain.has ? `
+        ${chipRowHTML(PAIN_AREA_OPTS, pain.area, prefix+".pain.area", () => COLORS.neutral, false)}
+        <div class="intensity-row" style="margin-top:8px;">${INTENSITY_OPTS.map(i=>`<button class="intensity-chip${pain.intensity===i?" active":""}" data-intensity="${prefix}.pain" data-val="${i}">${i}</button>`).join("")}</div>
+        <input class="text-field" style="margin-top:8px;" data-field="${prefix}.pain.comment" value="${esc(pain.comment||"")}" placeholder="Comentario (opcional)"/>
+      ` : `<p class="small">Sin dolor registrado.</p>`}
+    </div>
+  `;
+}
+
 function dayFormHTML(entry, sportsList, prefix){
   const sports = entry.sports || [];
   const physio = entry.physio || {done:false,duration:null,comment:""};
@@ -339,6 +426,7 @@ function dayFormHTML(entry, sportsList, prefix){
       <div class="card-head"><h3>Fisioterapia</h3><button class="mark-btn physio${physio.done?" active":""}" data-toggle-physio="${prefix}">${physio.done?"Hecho":"Marcar"}</button></div>
       ${physio.done ? physioFieldsHTML(physio, prefix+".physio") : ""}
     </div>
+    ${healthCardsHTML(entry, prefix)}
     <div class="card">
       <div class="card-head"><h3>Mediciones</h3></div>
       <div class="meas-grid">
@@ -357,12 +445,19 @@ function renderToday(sportsList){
   const s = weekSummary(DATA.entries, dates);
   const prev = weekSummary(DATA.entries, weekDates(addDays(new Date(),-7)));
   const insights = generateInsights(DATA);
+  const streaks = computeStreaks(DATA.entries);
 
   return `
     <div class="head-row">
       <div><h1 class="title">Hoy</h1><p class="subtitle">${new Date().toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"})}</p></div>
-      ${ringSVG(adh.total)}
+      ${tripleRingSVG(adh, 64)}
     </div>
+    <div class="ring-legend">
+      <span><i style="background:${COLORS.food}"></i>Alimentación</span>
+      <span><i style="background:${COLORS.sport}"></i>Deporte</span>
+      <span><i style="background:${COLORS.physio}"></i>Fisioterapia</span>
+    </div>
+    ${streaks.current>0 ? `<div class="streak-badge">🔥 ${streaks.current} día${streaks.current===1?"":"s"} seguido${streaks.current===1?"":"s"} con deporte</div>` : ""}
     ${DATA.isDemo ? `<div class="demo-banner">Estás viendo datos de demostración. Andá a Ajustes para borrarlos y empezar con los tuyos.</div>` : ""}
     ${dayFormHTML(entry, sportsList, "today")}
     <div class="card">
@@ -375,12 +470,20 @@ function renderToday(sportsList){
       <div class="summary-row"><span>Fisioterapia</span><span><b>${s.physioSessions} ses.</b><span class="prev">(sem. ant. ${prev.physioSessions})</span></span></div>
       ${s.weightDelta!=null ? `<div class="summary-row"><span>Peso</span><span><b>${s.weightDelta>=0?"+":""}${s.weightDelta.toFixed(1)} kg</b></span></div>`:""}
       ${s.waistDelta!=null ? `<div class="summary-row"><span>Cintura</span><span><b>${s.waistDelta>=0?"+":""}${s.waistDelta.toFixed(1)} cm</b></span></div>`:""}
+      <div class="summary-row"><span>Hidratación buena</span><span><b>${s.hydrationGood}/7</b><span class="prev">(sem. ant. ${prev.hydrationGood}/7)</span></span></div>
+      <div class="summary-row"><span>Sueño bueno</span><span><b>${s.sleepGood}/7</b><span class="prev">(sem. ant. ${prev.sleepGood}/7)</span></span></div>
+      ${s.painDays>0 ? `<div class="summary-row"><span>Días con dolor</span><span><b>${s.painDays}/7</b></span></div>`:""}
     </div>
     ${insights.length ? `<div class="card"><div class="card-head"><h3>Observaciones</h3></div>${insights.map(i=>`<div class="insight-item"><span class="dot">•</span><span>${esc(i)}</span></div>`).join("")}</div>` : ""}
   `;
 }
 
 function renderCalendar(){
+  const toggle = `<div class="range-toggle" style="margin-bottom:12px;">${[["month","Mes"],["week","Semana"]].map(([v,l])=>`<button data-cal-mode="${v}" class="${CAL_MODE===v?"active":""}">${l}</button>`).join("")}</div>`;
+  return toggle + (CAL_MODE === "week" ? renderCalendarWeek() : renderCalendarMonth());
+}
+
+function renderCalendarMonth(){
   const weeks = monthMatrix(CAL_CURSOR.getFullYear(), CAL_CURSOR.getMonth());
   const monthLabel = CAL_CURSOR.toLocaleDateString("es-ES",{month:"long",year:"numeric"});
   const dows = ["L","M","X","J","V","S","D"];
@@ -397,6 +500,7 @@ function renderCalendar(){
       if (e?.sports?.length) dots += `<div class="dot-sm" style="background:${COLORS.sport}"></div>`;
       if (e?.physio?.done) dots += `<div class="dot-sm" style="background:${COLORS.physio}"></div>`;
       if (e?.weight!=null || e?.waist!=null) dots += `<div class="dot-sm" style="background:${COLORS.weight}"></div>`;
+      if (e?.pain?.has) dots += `<div class="dot-sm" style="background:${COLORS.neutral}"></div>`;
       grid += `<button class="cal-day${inMonth?"":" out"}${isToday?" today":""}" data-day="${k}"><span class="n">${d.getDate()}</span><div class="dots">${dots}</div></button>`;
     });
   });
@@ -408,7 +512,38 @@ function renderCalendar(){
       <div class="li"><div class="sw" style="background:${COLORS.sport}"></div>Deporte</div>
       <div class="li"><div class="sw" style="background:${COLORS.physio}"></div>Fisio</div>
       <div class="li"><div class="sw" style="background:${COLORS.weight}"></div>Medición</div>
+      <div class="li"><div class="sw" style="background:${COLORS.neutral}"></div>Dolor</div>
     </div>
+  `;
+}
+
+function renderCalendarWeek(){
+  const dates = weekDates(CAL_CURSOR);
+  const label = `${fmtShort(dates[0])} – ${fmtShort(dates[6])}`;
+  const dayNames = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+  const rows = dates.map((d,i) => {
+    const k = dateKey(d);
+    const e = DATA.entries[k];
+    const isToday = k === todayKey();
+    const lunchLabel = e?.lunch ? LUNCH_OPTS.find(o=>o.v===e.lunch)?.label : "—";
+    const dinnerLabel = e?.dinner ? DINNER_OPTS.find(o=>o.v===e.dinner)?.label : "—";
+    const sportLabel = e?.sports?.length ? e.sports.map(sp=>sp.type).join(", ") : "—";
+    const physioLabel = e?.physio?.done ? `${e.physio.duration??"?"} min` : "—";
+    const measParts = [e?.weight!=null?`${e.weight} kg`:null, e?.waist!=null?`${e.waist} cm`:null].filter(Boolean);
+    const measLabel = measParts.length ? measParts.join(" · ") : "—";
+    return `
+      <button class="week-day-row${isToday?" today":""}" data-day="${k}">
+        <div class="week-day-head"><span class="wd-name">${dayNames[i]}</span><span class="wd-date">${d.getDate()}</span></div>
+        <div class="wd-line"><span class="wd-label">Almuerzo</span><span>${lunchLabel}</span></div>
+        <div class="wd-line"><span class="wd-label">Cena</span><span>${dinnerLabel}</span></div>
+        <div class="wd-line"><span class="wd-label">Deporte</span><span>${esc(sportLabel)}</span></div>
+        <div class="wd-line"><span class="wd-label">Fisio</span><span>${physioLabel}</span></div>
+        <div class="wd-line"><span class="wd-label">Mediciones</span><span>${measLabel}</span></div>
+      </button>`;
+  }).join("");
+  return `
+    <div class="cal-head"><button data-cal-nav="-1">‹</button><h2 style="font-size:15px;font-weight:700;">${label}</h2><button data-cal-nav="1">›</button></div>
+    <div class="week-list">${rows}</div>
   `;
 }
 
@@ -423,6 +558,21 @@ function renderModal(sportsList){
       ${dayFormHTML(entry, sportsList, "modal")}
     </div>`;
   app.appendChild(wrap);
+}
+
+function sportDistributionHTML(dates, entries){
+  const counts = {};
+  dates.forEach((d) => { (entries[dateKey(d)]?.sports||[]).forEach((sp) => { counts[sp.type] = (counts[sp.type]||0)+1; }); });
+  const items = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+  if (!items.length) return `<p class="small">Todavía no hay actividades registradas en este período.</p>`;
+  const max = items[0][1];
+  const palette = ["#2FB8A0","#E8A33D","#6C8CFF","#E05B4F","#8B7FD6","#4FC1E9","#B8A398"];
+  return `<div style="margin-top:10px;">${items.map(([name,count],i) => `
+    <div class="dist-row">
+      <span class="dist-label">${esc(name)}</span>
+      <div class="dist-bar-track"><div class="dist-bar-fill" style="width:${(count/max)*100}%;background:${palette[i%palette.length]}"></div></div>
+      <span class="dist-count">${count}</span>
+    </div>`).join("")}</div>`;
 }
 
 function renderEvolution(){
@@ -445,6 +595,14 @@ function renderEvolution(){
   const goals = DATA.config.goals || {};
   const weightGoalNote = (goals.weight!=null && lastW!=null) ? `Meta: ${goals.weight} kg (${Math.abs(lastW-goals.weight).toFixed(1)} kg ${lastW>goals.weight?"por encima":lastW<goals.weight?"por debajo":"— ¡cumplida!"})` : (goals.weight!=null ? `Meta: ${goals.weight} kg` : "");
   const waistGoalNote = (goals.waist!=null && lastC!=null) ? `Meta: ${goals.waist} cm (${Math.abs(lastC-goals.waist).toFixed(1)} cm ${lastC>goals.waist?"por encima":lastC<goals.waist?"por debajo":"— ¡cumplida!"})` : (goals.waist!=null ? `Meta: ${goals.waist} cm` : "");
+  const profile = DATA.config.profile || {};
+  const waistRef = waistReference(profile.sex, lastC);
+
+  const hydGoodDays = dates.filter(d=>DATA.entries[dateKey(d)]?.hydration==="good").length;
+  const sleepGoodDays = dates.filter(d=>DATA.entries[dateKey(d)]?.sleep?.quality==="good").length;
+  const sleepHoursKnown = dates.map(d=>DATA.entries[dateKey(d)]?.sleep?.hours).filter(v=>v!=null);
+  const avgSleepHours = sleepHoursKnown.length ? (sleepHoursKnown.reduce((a,b)=>a+b,0)/sleepHoursKnown.length) : null;
+  const painDaysInRange = dates.filter(d=>DATA.entries[dateKey(d)]?.pain?.has).length;
 
   return `
     <div class="head-row"><h1 class="title" style="margin-bottom:0;">Evolución</h1>
@@ -461,6 +619,7 @@ function renderEvolution(){
       <div class="card-head"><h3>Cintura</h3></div>
       <div class="weight-row"><span>Última: <b>${lastC!=null?lastC+" cm":"—"}</b></span><span>Variación: <b>${(firstC!=null&&lastC!=null)?((lastC-firstC>=0?"+":"")+(lastC-firstC).toFixed(1)+" cm"):"—"}</b></span></div>
       ${waistGoalNote?`<p class="legend-note" style="margin-top:-4px;">${waistGoalNote}</p>`:""}
+      ${waistRef?`<p class="legend-note">Referencia general por sexo: ${waistRef}. No es un diagnóstico.</p>`:""}
       <canvas class="chart" id="chart-waist" height="140"></canvas>
     </div>
     <div class="card">
@@ -474,6 +633,16 @@ function renderEvolution(){
         <div class="stat-box"><div class="l">Min. totales</div><div class="v">${totalMinutes}</div></div>
         <div class="stat-box"><div class="l">Calorías</div><div class="v">${totalCalories}</div></div>
         <div class="stat-box"><div class="l">Días/semana</div><div class="v">${(sportDaysInRange/weeksInRange).toFixed(1)}</div></div>
+      </div>
+      ${sportDistributionHTML(dates, DATA.entries)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Bienestar</h3></div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="l">Hidratación buena</div><div class="v">${hydGoodDays}/${dates.length}</div></div>
+        <div class="stat-box"><div class="l">Sueño bueno</div><div class="v">${sleepGoodDays}/${dates.length}</div></div>
+        <div class="stat-box"><div class="l">Prom. horas sueño</div><div class="v">${avgSleepHours!=null?avgSleepHours.toFixed(1):"—"}</div></div>
+        <div class="stat-box"><div class="l">Días con dolor</div><div class="v">${painDaysInRange}</div></div>
       </div>
     </div>
     <div class="card">
@@ -581,6 +750,7 @@ function drawCharts(){
 
 function renderSettings(){
   const cfg = DATA.config;
+  const age = ageFromBirthDate(cfg.profile?.birthDate);
   return `
     <h1 class="title">Ajustes</h1>
     ${DATA.isDemo ? `
@@ -589,6 +759,17 @@ function renderSettings(){
       <p class="small" style="margin-bottom:10px;">Estás usando datos ficticios para explorar la app.</p>
       <button class="btn primary" id="clear-demo">Borrar datos demo y comenzar</button>
     </div>`:""}
+    <div class="card">
+      <div class="card-head"><h3>Perfil</h3></div>
+      <p class="small" style="margin-bottom:10px;">Opcional. La edad es solo informativa; el sexo habilita una referencia general de cintura en Evolución — no cambia tu puntaje de adherencia ni es un diagnóstico.</p>
+      <label class="field-label">Fecha de nacimiento</label>
+      <input class="big-input" style="font-size:15px;margin-bottom:4px;" type="date" id="profile-birthdate" value="${cfg.profile?.birthDate||""}"/>
+      ${age!=null?`<p class="small" style="margin-bottom:10px;">Edad: ${age} años</p>`:`<div style="margin-bottom:10px;"></div>`}
+      <label class="field-label">Sexo</label>
+      <div class="grid2" style="grid-template-columns:1fr 1fr 1fr;margin-top:4px;">
+        ${[["f","Femenino"],["m","Masculino"],["x","Prefiero no decir"]].map(([v,l])=>`<button class="chip${cfg.profile?.sex===v?" active":""}" data-sex="${v}" style="${cfg.profile?.sex===v?`background:${COLORS.physio};border-color:${COLORS.physio};`:""}">${l}</button>`).join("")}
+      </div>
+    </div>
     <div class="card">
       <div class="card-head"><h3>Apariencia</h3></div>
       <div class="grid2" style="grid-template-columns:1fr 1fr 1fr;">
@@ -681,9 +862,10 @@ function setField(prefix, path, value){
 function attachHandlers(sportsList){
   // nav
   app.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => { VIEW = b.dataset.nav; render(); });
-  // chips (lunch/dinner)
+  // chips (lunch/dinner/hydration/sleep/pain-area)
   app.querySelectorAll("[data-chip]").forEach(b => b.onclick = () => {
-    const [prefix, field] = b.dataset.chip.split(".");
+    const [prefix, ...rest] = b.dataset.chip.split(".");
+    const field = rest.join(".");
     const val = b.dataset.val === "__unset__" ? null : b.dataset.val;
     setField(prefix, field, val);
     render();
@@ -717,6 +899,14 @@ function attachHandlers(sportsList){
     setField(prefix, "physio", cur?.done ? {done:false,duration:null,comment:""} : {done:true,duration:20,comment:""});
     render();
   });
+  // pain toggle
+  app.querySelectorAll("[data-toggle-pain]").forEach(b => b.onclick = () => {
+    const prefix = b.dataset.togglePain;
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const cur = DATA.entries[key]?.pain;
+    setField(prefix, "pain", cur?.has ? {has:false,area:null,intensity:null,comment:""} : {has:true,area:null,intensity:null,comment:""});
+    render();
+  });
   // intensity (sport sessions) — data-intensity is a path like "today.sports.0"
   app.querySelectorAll("[data-intensity]").forEach(b => b.onclick = () => {
     const pathParts = b.dataset.intensity.split(".");
@@ -744,9 +934,11 @@ function attachHandlers(sportsList){
   // calendar
   app.querySelectorAll("[data-cal-nav]").forEach(b => b.onclick = () => {
     const d = parseInt(b.dataset.calNav);
-    CAL_CURSOR = new Date(CAL_CURSOR.getFullYear(), CAL_CURSOR.getMonth()+d, 1);
+    if (CAL_MODE === "week") CAL_CURSOR = addDays(CAL_CURSOR, d*7);
+    else CAL_CURSOR = new Date(CAL_CURSOR.getFullYear(), CAL_CURSOR.getMonth()+d, 1);
     render();
   });
+  app.querySelectorAll("[data-cal-mode]").forEach(b => b.onclick = () => { CAL_MODE = b.dataset.calMode; render(); });
   app.querySelectorAll("[data-day]").forEach(b => b.onclick = () => { MODAL_DATE = b.dataset.day; render(); });
   // evolution range
   app.querySelectorAll("[data-range]").forEach(b => b.onclick = () => { EVO_RANGE = parseInt(b.dataset.range); render(); });
@@ -777,6 +969,12 @@ function attachHandlers(sportsList){
   if (goalWeight) { const h = () => { DATA.config.goals = {...DATA.config.goals, weight: goalWeight.value===""?null:parseFloat(goalWeight.value)}; persist(); }; goalWeight.oninput = h; goalWeight.onchange = h; }
   const goalWaist = document.getElementById("goal-waist");
   if (goalWaist) { const h = () => { DATA.config.goals = {...DATA.config.goals, waist: goalWaist.value===""?null:parseFloat(goalWaist.value)}; persist(); }; goalWaist.oninput = h; goalWaist.onchange = h; }
+  const birthdateInput = document.getElementById("profile-birthdate");
+  if (birthdateInput) { const h = () => { DATA.config.profile = {...DATA.config.profile, birthDate: birthdateInput.value||null}; persist(); render(); }; birthdateInput.onchange = h; }
+  app.querySelectorAll("[data-sex]").forEach(b => b.onclick = () => {
+    DATA.config.profile = {...DATA.config.profile, sex: DATA.config.profile?.sex===b.dataset.sex ? null : b.dataset.sex};
+    persist(); render();
+  });
   const addSportBtn = document.getElementById("add-sport");
   if (addSportBtn) addSportBtn.onclick = () => {
     const inp = document.getElementById("new-sport");
@@ -794,12 +992,12 @@ function attachHandlers(sportsList){
   };
   const exportCsvBtn = document.getElementById("export-csv");
   if (exportCsvBtn) exportCsvBtn.onclick = () => {
-    const rows = [["fecha","almuerzo","cena","deporte_tipo","deporte_min","deporte_kcal","deporte_intensidad","deporte_comentario","fisio_hecho","fisio_min","peso","cintura"]];
+    const rows = [["fecha","almuerzo","cena","hidratacion","sueno_calidad","sueno_horas","dolor","dolor_zona","dolor_intensidad","deporte_tipo","deporte_min","deporte_kcal","deporte_intensidad","deporte_comentario","fisio_hecho","fisio_min","peso","cintura"]];
     Object.keys(DATA.entries).sort().forEach(k => {
       const e = DATA.entries[k];
       const sessions = (e.sports && e.sports.length) ? e.sports : [null];
       sessions.forEach((sp) => {
-        rows.push([k, e.lunch||"", e.dinner||"",
+        rows.push([k, e.lunch||"", e.dinner||"", e.hydration||"", e.sleep?.quality||"", e.sleep?.hours??"", e.pain?.has?"si":"no", e.pain?.area||"", e.pain?.intensity||"",
           sp?.type||"", sp?.duration??"", sp?.calories??"", sp?.intensity||"", sp?.comment||"",
           e.physio?.done?"si":"no", e.physio?.duration??"", e.weight??"", e.waist??""]);
       });

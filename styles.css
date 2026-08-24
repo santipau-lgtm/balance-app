@@ -99,3 +99,20 @@ canvas.chart{width:100%;display:block;}
 .modal-head button{background:none;border:none;color:var(--sub);font-size:20px;}
 .footer-note{text-align:center;font-size:11px;color:var(--sub);margin:16px 0 8px;}
 input[type=file]{font-size:11px;color:var(--sub);}
+.ring-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--sub);margin-bottom:10px;}
+.ring-legend span{display:flex;align-items:center;gap:5px;}
+.ring-legend i{width:8px;height:8px;border-radius:99px;display:inline-block;}
+.streak-badge{background:var(--card-alt);display:inline-block;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;margin-bottom:10px;}
+.week-list{display:flex;flex-direction:column;gap:8px;}
+.week-day-row{background:var(--card);border-radius:20px;padding:12px 14px;text-align:left;border:none;font-family:inherit;color:var(--text);width:100%;}
+.week-day-row.today{outline:2px solid var(--sport);outline-offset:-2px;}
+.week-day-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;}
+.wd-name{font-size:14px;font-weight:700;text-transform:capitalize;}
+.wd-date{font-size:12px;color:var(--sub);}
+.wd-line{display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:var(--sub);}
+.wd-line span:last-child{color:var(--text);font-weight:500;text-align:right;max-width:60%;}
+.dist-row{display:flex;align-items:center;gap:8px;margin-bottom:7px;}
+.dist-label{width:100px;flex-shrink:0;font-size:12px;}
+.dist-bar-track{flex:1;height:10px;background:var(--card-alt);border-radius:6px;overflow:hidden;}
+.dist-bar-fill{height:100%;border-radius:6px;}
+.dist-count{width:22px;text-align:right;font-size:12px;font-weight:600;}

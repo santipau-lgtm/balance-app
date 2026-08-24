@@ -73,6 +73,12 @@ la raíz y HTTPS.
 
 ## Changelog
 
+- **v5**: vista de calendario semana/mes, racha visible en Hoy, anillo triple
+  (alimentación/deporte/fisio) en vez de uno solo, distribución de deportes en
+  Evolución, registro de hidratación y sueño (cualitativos), registro opcional de
+  dolor (zona/intensidad/comentario), perfil opcional (fecha de nacimiento y sexo)
+  con referencia general de cintura por sexo en Evolución — informativa, no afecta
+  el puntaje de adherencia ni es un diagnóstico. Los datos viejos se migran solos.
 - **v4**: los íconos se movieron a la raíz del repo (antes iban en `icons/`, y si no
   se subían bien rompían la instalación del service worker para toda la app). El
   service worker ahora tolera archivos faltantes en vez de fallar por completo.
