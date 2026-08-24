@@ -1050,7 +1050,23 @@ function downloadFile(filename, content, mime){
 
 /* ------------------------------ service worker ------------------------------ */
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(()=>{}); });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // Actively ask the browser to check for a newer sw.js right now,
+      // instead of passively waiting for it to notice on its own schedule.
+      reg.update().catch(() => {});
+    }).catch(() => {});
+  });
+  // When a new service worker takes over (thanks to skipWaiting/clients.claim
+  // in sw.js), reload once so the fresh app.js actually gets used. Without
+  // this, the new version stays "installed in the background" and the person
+  // has to guess how many times to close and reopen the app.
+  let swRefreshed = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (swRefreshed) return;
+    swRefreshed = true;
+    window.location.reload();
+  });
 }
 
 boot();
