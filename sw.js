@@ -1,4 +1,4 @@
-const CACHE = "balance-v6";
+const CACHE = "balance-v7";
 const ASSETS = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.json",
   "./icon-180.png", "./icon-192.png", "./icon-512.png",

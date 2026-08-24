@@ -87,6 +87,7 @@ canvas.chart{width:100%;display:block;}
 .tag button{background:none;border:none;color:var(--sub);cursor:pointer;padding:0 4px;}
 .btn{width:100%;padding:13px;border-radius:18px;font-weight:600;font-size:15px;border:none;font-family:inherit;}
 .btn.primary{background:var(--sport);color:#fff;}
+.btn:disabled{opacity:.75;}
 .btn.ghost{background:var(--card-alt);color:var(--text);}
 .btn.danger-text{background:none;color:var(--bad);}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}

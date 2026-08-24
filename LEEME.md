@@ -73,15 +73,16 @@ la raíz y HTTPS.
 
 ## Changelog
 
+- **v7**: botón "Guardar día" al final del formulario, con confirmación visual (aunque
+  la app ya guardaba todo automáticamente, ahora hay una señal clara de que quedó
+  registrado). Dos gráficos nuevos en Evolución: minutos de actividad acumulados por
+  semana y calorías quemadas acumuladas por semana, últimas 8 semanas.
 - **v6**: la app ahora se actualiza sola. Antes, aplicar una versión nueva dependía
   de que el service worker del teléfono la detectara por su cuenta al reabrir, lo
   cual no era confiable (sobre todo en PWAs instaladas en iOS) y obligaba a cerrar y
   reabrir un número impredecible de veces. Ahora, al abrir la app, chequea
   activamente si hay una versión nueva publicada y, si la hay, se recarga sola una
-  vez para aplicarla — ya no hace falta adivinar cuántas veces reabrir. **Esta
-  actualización en particular todavía necesita el cierre manual una vez** (para
-  instalar el propio mecanismo de auto-actualización); de ahí en adelante debería
-  ser automático.
+  vez para aplicarla — ya no hace falta adivinar cuántas veces reabrir.
 - **v5**: vista de calendario semana/mes, racha visible en Hoy, anillo triple
   (alimentación/deporte/fisio) en vez de uno solo, distribución de deportes en
   Evolución, registro de hidratación y sueño (cualitativos), registro opcional de

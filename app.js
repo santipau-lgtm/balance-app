@@ -434,6 +434,7 @@ function dayFormHTML(entry, sportsList, prefix){
         <div><label class="field-label">Cintura (cm)</label><input class="big-input" type="number" inputmode="decimal" step="0.1" data-field="${prefix}.waist" value="${entry.waist??""}" placeholder="—"/></div>
       </div>
     </div>
+    <button class="btn primary" data-save-day="${prefix}" style="margin-bottom:18px;">Guardar día</button>
   `;
 }
 
@@ -560,6 +561,17 @@ function renderModal(sportsList){
   app.appendChild(wrap);
 }
 
+function weeklyTotals(entries, weeksBack, field){
+  const vals = []; const labels = [];
+  for (let i=weeksBack-1;i>=0;i--){
+    const wd = weekDates(addDays(new Date(), -7*i));
+    const s = weekSummary(entries, wd);
+    vals.push(s[field]);
+    labels.push(fmtShort(wd[0]));
+  }
+  return { vals, labels };
+}
+
 function sportDistributionHTML(dates, entries){
   const counts = {};
   dates.forEach((d) => { (entries[dateKey(d)]?.sports||[]).forEach((sp) => { counts[sp.type] = (counts[sp.type]||0)+1; }); });
@@ -635,6 +647,10 @@ function renderEvolution(){
         <div class="stat-box"><div class="l">Días/semana</div><div class="v">${(sportDaysInRange/weeksInRange).toFixed(1)}</div></div>
       </div>
       ${sportDistributionHTML(dates, DATA.entries)}
+      <p class="legend-note" style="margin-top:12px;margin-bottom:2px;">Minutos de actividad por semana (últimas 8)</p>
+      <canvas class="chart" id="chart-minutes" height="120"></canvas>
+      <p class="legend-note" style="margin-top:10px;margin-bottom:2px;">Calorías quemadas por semana (últimas 8)</p>
+      <canvas class="chart" id="chart-calories" height="120"></canvas>
     </div>
     <div class="card">
       <div class="card-head"><h3>Bienestar</h3></div>
@@ -701,11 +717,12 @@ function drawBarChart(canvas, labels, values, colorFn, opts){
   const w = canvas.clientWidth, h = canvas.clientHeight || parseInt(canvas.getAttribute("height"));
   canvas.width = w*dpr; canvas.height = h*dpr; ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,w,h);
-  const left=26, right=6, top=8, bottom=18;
+  const left=30, right=6, top=8, bottom=18;
+  const maxVal = (opts && opts.max != null) ? Math.max(opts.max, 1) : 100;
   const bw = (w-left-right)/values.length;
   ctx.fillStyle = opts.axis||"#999"; ctx.font="10px -apple-system,sans-serif"; ctx.textAlign="center";
   values.forEach((v,i) => {
-    const bh = ((h-top-bottom)*Math.max(0,Math.min(100,v)))/100;
+    const bh = ((h-top-bottom)*Math.max(0,Math.min(maxVal,v)))/maxVal;
     const bx = left + i*bw + bw*0.15, bw2 = bw*0.7;
     ctx.fillStyle = colorFn(v);
     const by = h-bottom-bh;
@@ -721,6 +738,11 @@ function drawBarChart(canvas, labels, values, colorFn, opts){
     ctx.fillStyle = opts.axis||"#999";
     ctx.fillText(labels[i], bx+bw2/2, h-4);
   });
+  if (opts && opts.showMax) {
+    ctx.textAlign = "left";
+    ctx.fillStyle = opts.axis || "#999";
+    ctx.fillText(String(Math.round(maxVal)), 2, top+8);
+  }
 }
 function drawCharts(){
   const dates = [];
@@ -745,6 +767,17 @@ function drawCharts(){
     const weeks = []; const labels=[];
     for (let i=7;i>=0;i--){ const wd=weekDates(addDays(new Date(),-7*i)); const adh=computeWeekAdherence(DATA.entries,wd,DATA.config); weeks.push(adh.total); labels.push(fmtShort(wd[0])); }
     drawBarChart(ac, labels, weeks, v => v>=70?COLORS.sport:v>=40?COLORS.food:COLORS.bad, {axis});
+  }
+
+  const mc = document.getElementById("chart-minutes");
+  if (mc) {
+    const { vals, labels } = weeklyTotals(DATA.entries, 8, "minutes");
+    drawBarChart(mc, labels, vals, () => COLORS.sport, { axis, max: Math.max(...vals, 1), showMax: true });
+  }
+  const kc = document.getElementById("chart-calories");
+  if (kc) {
+    const { vals, labels } = weeklyTotals(DATA.entries, 8, "calories");
+    drawBarChart(kc, labels, vals, () => COLORS.weight, { axis, max: Math.max(...vals, 1), showMax: true });
   }
 }
 
@@ -931,7 +964,14 @@ function attachHandlers(sportsList){
     inp.oninput = handler;
     inp.onchange = handler; // fallback: some mobile browsers don't fire "input" reliably on <select>
   });
-  // calendar
+  // explicit save button — flushes immediately and gives visible confirmation
+  app.querySelectorAll("[data-save-day]").forEach(b => b.onclick = () => {
+    flushSave();
+    const original = b.textContent;
+    b.textContent = "✓ Guardado";
+    b.disabled = true;
+    setTimeout(() => { b.textContent = original; b.disabled = false; }, 1200);
+  });
   app.querySelectorAll("[data-cal-nav]").forEach(b => b.onclick = () => {
     const d = parseInt(b.dataset.calNav);
     if (CAL_MODE === "week") CAL_CURSOR = addDays(CAL_CURSOR, d*7);
