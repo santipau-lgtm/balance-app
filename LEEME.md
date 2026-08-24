@@ -47,4 +47,15 @@ la raíz y HTTPS.
   es compatible entre ambos, así que podés exportar de uno e importar en el otro si
   querés migrar.
 - Si en algún momento cambiás `app.js` o `styles.css`, actualizá `CACHE` en `sw.js`
-  (por ejemplo `balance-v2`) para forzar a los dispositivos a bajar la versión nueva.
+  (por ejemplo `balance-v4`) para forzar a los dispositivos a bajar la versión nueva.
+
+## Changelog
+
+- **v3**: varios deportes por día (antes solo uno), metas informativas de peso/cintura
+  (se muestran en Evolución, no afectan el puntaje de adherencia), chip explícito
+  "Sin registrar" en almuerzo/cena, corrección de un bug de guardado (se perdía el
+  registro de deporte si cerrabas la app rápido) y de un bug de la intensidad del
+  deporte. Los datos viejos con el formato anterior se migran solos al abrir la app,
+  no hace falta hacer nada manual.
+- **v2**: corrección de bugs de guardado.
+- **v1**: versión inicial.
