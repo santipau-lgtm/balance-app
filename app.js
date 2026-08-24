@@ -1,0 +1,750 @@
+/* Balance — standalone PWA, vanilla JS, IndexedDB storage, no backend. */
+(function () {
+"use strict";
+
+/* ---------------------------- IndexedDB layer ---------------------------- */
+const DB_NAME = "balance-db";
+const STORE = "kv";
+const KEY = "app-data";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(key);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(value, key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ------------------------------- constants ------------------------------- */
+const DEFAULT_SPORTS = ["Caminar", "Correr", "Bicicleta", "Gimnasio/Fuerza", "Fútbol", "Pádel/Tenis", "Natación", "Otro"];
+const LUNCH_OPTS = [{v:"ok",label:"OK",score:100},{v:"regular",label:"Regular",score:50},{v:"bad",label:"No adecuado",score:0}];
+const DINNER_OPTS = [{v:"light",label:"Liviana",score:100},{v:"normal",label:"Normal",score:50},{v:"excessive",label:"Excesiva",score:0}];
+const INTENSITY_OPTS = ["Baja","Media","Alta"];
+const COLORS = { food:"#E8A33D", sport:"#2FB8A0", physio:"#6C8CFF", weight:"#E8654A", bad:"#E05B4F" };
+
+/* -------------------------------- helpers -------------------------------- */
+const pad = (n) => String(n).padStart(2,"0");
+const dateKey = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const todayKey = () => dateKey(new Date());
+const parseKey = (k) => { const [y,m,d]=k.split("-").map(Number); return new Date(y,m-1,d); };
+const addDays = (d,n) => { const nd=new Date(d); nd.setDate(nd.getDate()+n); return nd; };
+const startOfWeek = (d) => { const nd=new Date(d); const day=(nd.getDay()+6)%7; nd.setDate(nd.getDate()-day); nd.setHours(0,0,0,0); return nd; };
+const weekDates = (d) => { const s=startOfWeek(d); return Array.from({length:7},(_,i)=>addDays(s,i)); };
+const fmtShort = (d) => d.toLocaleDateString("es-ES",{day:"2-digit",month:"short"});
+function emptyEntry(){ return {lunch:null,dinner:null,sport:null,physio:null,weight:null,waist:null}; }
+function movingAvg(arr,w){ return arr.map((_,i)=>{ const s=Math.max(0,i-w+1); const slice=arr.slice(s,i+1).filter(v=>v!=null); if(!slice.length) return null; return slice.reduce((a,b)=>a+b,0)/slice.length; }); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function monthMatrix(year, month) {
+  const first = new Date(year, month, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const start = addDays(first, -startOffset);
+  const weeks = [];
+  let cur = start;
+  for (let w = 0; w < 6; w++) {
+    const row = [];
+    for (let d = 0; d < 7; d++) { row.push(cur); cur = addDays(cur, 1); }
+    weeks.push(row);
+    if (cur.getMonth() !== month && w >= 3 && cur.getDate() > 7) break;
+  }
+  return weeks;
+}
+
+/* ----------------------------- demo data ----------------------------- */
+function generateDemoData(days=60){
+  const entries = {};
+  const today = new Date();
+  let weight = 82.4, waist = 95.2;
+  const sports = ["Caminar","Correr","Bicicleta","Gimnasio/Fuerza","Fútbol","Natación"];
+  for (let i = days-1; i >= 0; i--) {
+    const d = addDays(today, -i);
+    const k = dateKey(d);
+    const dow = d.getDay();
+    const lunchRoll = Math.random(), dinnerRoll = Math.random();
+    const lunch = lunchRoll<0.55?"ok":lunchRoll<0.85?"regular":"bad";
+    const dinner = dinnerRoll<0.5?"light":dinnerRoll<0.82?"normal":"excessive";
+    const sportRoll = Math.random();
+    const sportDone = dow===0 ? sportRoll<0.3 : sportRoll<0.55;
+    const sport = sportDone ? {done:true, type:sports[Math.floor(Math.random()*sports.length)], duration:[20,30,40,45,60][Math.floor(Math.random()*5)], calories:Math.round(150+Math.random()*400), intensity:INTENSITY_OPTS[Math.floor(Math.random()*3)], comment:""} : {done:false,type:"",duration:null,calories:null,intensity:null,comment:""};
+    const physioDone = Math.random()<0.3;
+    const physio = physioDone ? {done:true,duration:20,comment:""} : {done:false,duration:null,comment:""};
+    weight += (Math.random()-0.56)*0.15;
+    waist += (Math.random()-0.54)*0.1;
+    entries[k] = {
+      lunch, dinner, sport, physio,
+      weight: i%3===0 ? Math.round(weight*10)/10 : null,
+      waist: i%9===0 ? Math.round(waist*10)/10 : null,
+    };
+  }
+  return entries;
+}
+function defaultData(){
+  return {
+    isDemo: true,
+    entries: generateDemoData(60),
+    customSports: [],
+    config: { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system" },
+  };
+}
+
+/* ---------------------------- adherence / stats ---------------------------- */
+function computeWeekAdherence(entries, dates, config){
+  const days = dates.map(d => entries[dateKey(d)] || null);
+  const lunchScores = days.map(e => e&&e.lunch ? LUNCH_OPTS.find(o=>o.v===e.lunch).score : null).filter(v=>v!=null);
+  const dinnerScores = days.map(e => e&&e.dinner ? DINNER_OPTS.find(o=>o.v===e.dinner).score : null).filter(v=>v!=null);
+  const foodPool = [...lunchScores, ...dinnerScores];
+  const foodScore = foodPool.length ? foodPool.reduce((a,b)=>a+b,0)/foodPool.length : null;
+  const sportDoneDays = days.filter(e=>e&&e.sport&&e.sport.done).length;
+  const sportScore = (sportDoneDays/7)*100;
+  let physioScore = null;
+  if (config.physioGoalEnabled) {
+    const sessions = days.filter(e=>e&&e.physio&&e.physio.done).length;
+    physioScore = Math.min(sessions/Math.max(1,config.physioWeeklyGoal),1)*100;
+  }
+  const parts = [];
+  if (foodScore!=null) parts.push({score:foodScore, weight:config.weights.food});
+  parts.push({score:sportScore, weight:config.weights.sport});
+  if (physioScore!=null) parts.push({score:physioScore, weight:config.weights.physio});
+  const totalWeight = parts.reduce((a,p)=>a+p.weight,0) || 1;
+  const total = parts.reduce((a,p)=>a+(p.score*p.weight)/totalWeight,0);
+  return { total: Math.round(total), foodScore, sportScore, physioScore, sportDoneDays };
+}
+function weekSummary(entries, dates){
+  const days = dates.map(d => entries[dateKey(d)] || null);
+  const lunchOk = days.filter(e=>e&&e.lunch==="ok").length;
+  const dinnerLight = days.filter(e=>e&&e.dinner==="light").length;
+  const sportDays = days.filter(e=>e&&e.sport&&e.sport.done).length;
+  const minutes = days.reduce((a,e)=>a+(e&&e.sport&&e.sport.done?(e.sport.duration||0):0),0);
+  const calories = days.reduce((a,e)=>a+(e&&e.sport&&e.sport.done?(e.sport.calories||0):0),0);
+  const physioSessions = days.filter(e=>e&&e.physio&&e.physio.done).length;
+  const weights = days.map(e=>e&&e.weight).filter(v=>v!=null);
+  const waists = days.map(e=>e&&e.waist).filter(v=>v!=null);
+  return { lunchOk, dinnerLight, sportDays, minutes, calories, physioSessions,
+    weightDelta: weights.length>=2 ? weights[weights.length-1]-weights[0] : null,
+    waistDelta: waists.length>=2 ? waists[waists.length-1]-waists[0] : null,
+  };
+}
+function generateInsights(data){
+  const insights = [];
+  const entries = data.entries;
+  const allKeys = Object.keys(entries).sort();
+  if (allKeys.length < 7) return insights;
+  const sortedDates = allKeys.map(parseKey).sort((a,b)=>a-b);
+  let bestStreak=0, run=0;
+  for (const d of sortedDates){ const e=entries[dateKey(d)]; if(e&&e.sport&&e.sport.done){run++;bestStreak=Math.max(bestStreak,run);} else run=0; }
+  let curStreak=0, cd=new Date();
+  while(true){ const e=entries[dateKey(cd)]; if(e&&e.sport&&e.sport.done){curStreak++;cd=addDays(cd,-1);} else break; }
+  if (curStreak>=3) insights.push(`Llevás ${curStreak} días seguidos haciendo deporte.`);
+  if (bestStreak>=4) insights.push(`Tu mejor racha de deporte fue de ${bestStreak} días consecutivos.`);
+  const now = new Date();
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth()-1, 1);
+  const sumMin = (from,to) => sortedDates.filter(d=>d>=from&&d<to).reduce((a,d)=>{const e=entries[dateKey(d)]; return a+(e&&e.sport&&e.sport.done?(e.sport.duration||0):0);},0);
+  const thisM = sumMin(thisMonthStart, addDays(now,1));
+  const lastM = sumMin(lastMonthStart, thisMonthStart);
+  if (lastM>0){ const pct=Math.round(((thisM-lastM)/lastM)*100); if(Math.abs(pct)>=10) insights.push(`Tus minutos de actividad ${pct>0?"aumentaron":"disminuyeron"} un ${Math.abs(pct)}% respecto del mes anterior.`); }
+  const knownWeights = sortedDates.map(d=>({d,w:entries[dateKey(d)]?.weight??null})).filter(x=>x.w!=null);
+  if (knownWeights.length>=4){ const last6w=knownWeights.filter(x=>x.d>=addDays(now,-42)); if(last6w.length>=2){ const delta=last6w[last6w.length-1].w-last6w[0].w; if(Math.abs(delta)>=0.3) insights.push(`Tu peso ${delta<0?"descendió":"aumentó"} ${Math.abs(delta).toFixed(1)} kg en las últimas semanas.`); } }
+  let withSport=[], withoutSport=[];
+  for (let i=0;i<6;i++){ const wd=weekDates(addDays(now,-7*i)); const adh=computeWeekAdherence(entries,wd,data.config); if(adh.foodScore==null) continue; if(adh.sportDoneDays>=3) withSport.push(adh.foodScore); else withoutSport.push(adh.foodScore); }
+  if (withSport.length>=2 && withoutSport.length>=2){ const avg=a=>a.reduce((x,y)=>x+y,0)/a.length; if(avg(withSport)-avg(withoutSport)>=10) insights.push("En las semanas en las que hiciste deporte al menos tres veces también registraste mayor adherencia alimentaria."); }
+  return insights.slice(0,4);
+}
+
+/* --------------------------------- state --------------------------------- */
+let DATA = null;
+let VIEW = "today";
+let CAL_CURSOR = new Date();
+let EVO_RANGE = 30;
+let MODAL_DATE = null;
+let saveTimer = null;
+
+function persist(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { idbSet(KEY, DATA); }, 150);
+}
+function updateEntry(key, patch){
+  const cur = DATA.entries[key] || emptyEntry();
+  DATA.entries[key] = { ...emptyEntry(), ...cur, ...patch };
+  persist();
+}
+function applyTheme(){
+  const theme = DATA.config.theme;
+  const dark = theme==="dark" || (theme==="system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", dark);
+  const meta = document.querySelector('meta[name=theme-color]:not([media])');
+}
+
+/* ---------------------------------- boot ---------------------------------- */
+async function boot(){
+  let stored = null;
+  try { stored = await idbGet(KEY); } catch(e){ console.error(e); }
+  DATA = stored || defaultData();
+  if (!stored) await idbSet(KEY, DATA);
+  applyTheme();
+  render();
+  if (window.matchMedia) {
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { applyTheme(); });
+  }
+}
+
+/* --------------------------------- render --------------------------------- */
+const app = document.getElementById("app");
+
+function render(){
+  applyTheme();
+  const sportsList = [...DEFAULT_SPORTS.slice(0,-1), ...DATA.customSports, "Otro"];
+  let html = `<div class="page">`;
+  if (VIEW === "today") html += renderToday(sportsList);
+  else if (VIEW === "calendar") html += renderCalendar();
+  else if (VIEW === "evolution") html += renderEvolution();
+  else if (VIEW === "settings") html += renderSettings();
+  html += `</div>`;
+  html += renderNav();
+  app.innerHTML = html;
+  if (MODAL_DATE) renderModal(sportsList);
+  attachHandlers(sportsList);
+  if (VIEW === "evolution") drawCharts();
+}
+
+function ringSVG(score, size=56){
+  const r = size/2-5, c=2*Math.PI*r, offset = c - (Math.max(0,Math.min(100,score))/100)*c;
+  const color = score>=70?COLORS.sport:score>=40?COLORS.food:COLORS.bad;
+  return `<div class="ring-wrap" style="width:${size}px;height:${size}px;">
+    <svg width="${size}" height="${size}">
+      <circle cx="${size/2}" cy="${size/2}" r="${r}" stroke="#8883" stroke-width="5" fill="none"/>
+      <circle cx="${size/2}" cy="${size/2}" r="${r}" stroke="${color}" stroke-width="5" fill="none"
+        stroke-dasharray="${c}" stroke-dashoffset="${offset}" stroke-linecap="round"
+        transform="rotate(-90 ${size/2} ${size/2})"/>
+    </svg><div class="num">${score}</div></div>`;
+}
+
+function chipRowHTML(options, value, group, colorFn){
+  return `<div class="chip-row">${options.map(o => {
+    const active = value===o.v;
+    const c = colorFn(o.v);
+    return `<button class="chip${active?" active":""}" data-chip="${group}" data-val="${o.v}" style="${active?`background:${c};border-color:${c};`:""}">${o.label}</button>`;
+  }).join("")}</div>`;
+}
+
+function sportFieldsHTML(sport, sportsList, prefix){
+  return `
+    <select data-field="${prefix}.type">${sportsList.map(s=>`<option value="${esc(s)}" ${sport.type===s?"selected":""}>${esc(s)}</option>`).join("")}</select>
+    <div class="row-gap">
+      <div class="num-field"><input type="number" inputmode="numeric" data-field="${prefix}.duration" value="${sport.duration??""}" placeholder="0"/><span>min</span></div>
+      <div class="num-field"><input type="number" inputmode="numeric" data-field="${prefix}.calories" value="${sport.calories??""}" placeholder="0"/><span>kcal</span></div>
+    </div>
+    <div class="intensity-row">${INTENSITY_OPTS.map(i=>`<button class="intensity-chip${sport.intensity===i?" active":""}" data-intensity="${prefix}" data-val="${i}">${i}</button>`).join("")}</div>
+    <input class="text-field" style="margin-top:8px;" data-field="${prefix}.comment" value="${esc(sport.comment||"")}" placeholder="Comentario (opcional)"/>
+  `;
+}
+function physioFieldsHTML(physio, prefix){
+  return `<div class="row-gap" style="align-items:center;">
+    <div class="num-field" style="max-width:100px;"><input type="number" inputmode="numeric" data-field="${prefix}.duration" value="${physio.duration??""}" placeholder="0"/><span>min</span></div>
+    <input class="text-field" data-field="${prefix}.comment" value="${esc(physio.comment||"")}" placeholder="Comentario (opcional)"/>
+  </div>`;
+}
+
+function dayFormHTML(entry, sportsList, prefix){
+  const sport = entry.sport || {done:false,type:"",duration:null,calories:null,intensity:null,comment:""};
+  const physio = entry.physio || {done:false,duration:null,comment:""};
+  return `
+    <div class="card">
+      <div class="card-head"><h3>Almuerzo</h3></div>
+      ${chipRowHTML(LUNCH_OPTS, entry.lunch, prefix+".lunch", v => v==="ok"?COLORS.sport:v==="regular"?COLORS.food:COLORS.bad)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Cena</h3></div>
+      ${chipRowHTML(DINNER_OPTS, entry.dinner, prefix+".dinner", v => v==="light"?COLORS.sport:v==="normal"?COLORS.food:COLORS.bad)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Deporte</h3><button class="mark-btn${sport.done?" active":""}" data-toggle-sport="${prefix}">${sport.done?"Hecho":"Marcar"}</button></div>
+      ${sport.done ? sportFieldsHTML(sport, sportsList, prefix+".sport") : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Fisioterapia</h3><button class="mark-btn physio${physio.done?" active":""}" data-toggle-physio="${prefix}">${physio.done?"Hecho":"Marcar"}</button></div>
+      ${physio.done ? physioFieldsHTML(physio, prefix+".physio") : ""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Mediciones</h3></div>
+      <div class="meas-grid">
+        <div><label class="field-label">Peso (kg)</label><input class="big-input" type="number" inputmode="decimal" step="0.1" data-field="${prefix}.weight" value="${entry.weight??""}" placeholder="—"/></div>
+        <div><label class="field-label">Cintura (cm)</label><input class="big-input" type="number" inputmode="decimal" step="0.1" data-field="${prefix}.waist" value="${entry.waist??""}" placeholder="—"/></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderToday(sportsList){
+  const k = todayKey();
+  const entry = DATA.entries[k] || emptyEntry();
+  const dates = weekDates(new Date());
+  const adh = computeWeekAdherence(DATA.entries, dates, DATA.config);
+  const s = weekSummary(DATA.entries, dates);
+  const prev = weekSummary(DATA.entries, weekDates(addDays(new Date(),-7)));
+  const insights = generateInsights(DATA);
+
+  return `
+    <div class="head-row">
+      <div><h1 class="title">Hoy</h1><p class="subtitle">${new Date().toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"})}</p></div>
+      ${ringSVG(adh.total)}
+    </div>
+    ${DATA.isDemo ? `<div class="demo-banner">Estás viendo datos de demostración. Andá a Ajustes para borrarlos y empezar con los tuyos.</div>` : ""}
+    ${dayFormHTML(entry, sportsList, "today")}
+    <div class="card">
+      <div class="card-head"><h3>Esta semana</h3></div>
+      <div class="summary-row"><span>Almuerzos OK</span><span><b>${s.lunchOk}/7</b><span class="prev">(sem. ant. ${prev.lunchOk}/7)</span></span></div>
+      <div class="summary-row"><span>Cenas livianas</span><span><b>${s.dinnerLight}/7</b><span class="prev">(sem. ant. ${prev.dinnerLight}/7)</span></span></div>
+      <div class="summary-row"><span>Deporte</span><span><b>${s.sportDays} días</b><span class="prev">(sem. ant. ${prev.sportDays})</span></span></div>
+      <div class="summary-row"><span>Actividad</span><span><b>${s.minutes} min</b><span class="prev">(sem. ant. ${prev.minutes})</span></span></div>
+      <div class="summary-row"><span>Calorías</span><span><b>${s.calories} kcal</b><span class="prev">(sem. ant. ${prev.calories})</span></span></div>
+      <div class="summary-row"><span>Fisioterapia</span><span><b>${s.physioSessions} ses.</b><span class="prev">(sem. ant. ${prev.physioSessions})</span></span></div>
+      ${s.weightDelta!=null ? `<div class="summary-row"><span>Peso</span><span><b>${s.weightDelta>=0?"+":""}${s.weightDelta.toFixed(1)} kg</b></span></div>`:""}
+      ${s.waistDelta!=null ? `<div class="summary-row"><span>Cintura</span><span><b>${s.waistDelta>=0?"+":""}${s.waistDelta.toFixed(1)} cm</b></span></div>`:""}
+    </div>
+    ${insights.length ? `<div class="card"><div class="card-head"><h3>Observaciones</h3></div>${insights.map(i=>`<div class="insight-item"><span class="dot">•</span><span>${esc(i)}</span></div>`).join("")}</div>` : ""}
+  `;
+}
+
+function renderCalendar(){
+  const weeks = monthMatrix(CAL_CURSOR.getFullYear(), CAL_CURSOR.getMonth());
+  const monthLabel = CAL_CURSOR.toLocaleDateString("es-ES",{month:"long",year:"numeric"});
+  const dows = ["L","M","X","J","V","S","D"];
+  let grid = `<div class="cal-grid">` + dows.map(d=>`<div class="cal-dow">${d}</div>`).join("");
+  weeks.forEach(row => {
+    row.forEach(d => {
+      const k = dateKey(d);
+      const inMonth = d.getMonth()===CAL_CURSOR.getMonth();
+      const e = DATA.entries[k];
+      const isToday = k===todayKey();
+      let dots = "";
+      if (e?.lunch) dots += `<div class="dot-sm" style="background:${e.lunch==="ok"?COLORS.sport:e.lunch==="regular"?COLORS.food:COLORS.bad}"></div>`;
+      if (e?.dinner) dots += `<div class="dot-sm" style="background:${e.dinner==="light"?COLORS.sport:e.dinner==="normal"?COLORS.food:COLORS.bad}"></div>`;
+      if (e?.sport?.done) dots += `<div class="dot-sm" style="background:${COLORS.sport}"></div>`;
+      if (e?.physio?.done) dots += `<div class="dot-sm" style="background:${COLORS.physio}"></div>`;
+      if (e?.weight!=null || e?.waist!=null) dots += `<div class="dot-sm" style="background:${COLORS.weight}"></div>`;
+      grid += `<button class="cal-day${inMonth?"":" out"}${isToday?" today":""}" data-day="${k}"><span class="n">${d.getDate()}</span><div class="dots">${dots}</div></button>`;
+    });
+  });
+  grid += `</div>`;
+  return `
+    <div class="cal-head"><button data-cal-nav="-1">‹</button><h2 style="text-transform:capitalize;font-size:17px;font-weight:700;">${monthLabel}</h2><button data-cal-nav="1">›</button></div>
+    <div class="card">${grid}</div>
+    <div class="legend">
+      <div class="li"><div class="sw" style="background:${COLORS.sport}"></div>Deporte</div>
+      <div class="li"><div class="sw" style="background:${COLORS.physio}"></div>Fisio</div>
+      <div class="li"><div class="sw" style="background:${COLORS.weight}"></div>Medición</div>
+    </div>
+  `;
+}
+
+function renderModal(sportsList){
+  const entry = DATA.entries[MODAL_DATE] || emptyEntry();
+  const label = parseKey(MODAL_DATE).toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long"});
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-sheet">
+      <div class="modal-head"><h2 style="text-transform:capitalize;font-size:17px;font-weight:700;">${label}</h2><button id="modal-close">✕</button></div>
+      ${dayFormHTML(entry, sportsList, "modal")}
+    </div>`;
+  app.appendChild(wrap);
+}
+
+function renderEvolution(){
+  const dates = [];
+  for (let i=EVO_RANGE-1;i>=0;i--) dates.push(addDays(new Date(),-i));
+  const weightSeries = dates.map(d=>DATA.entries[dateKey(d)]?.weight ?? null);
+  const waistSeries = dates.map(d=>DATA.entries[dateKey(d)]?.waist ?? null);
+  const knownW = weightSeries.filter(v=>v!=null);
+  const knownC = waistSeries.filter(v=>v!=null);
+  const lastW = knownW[knownW.length-1] ?? null, firstW = knownW[0] ?? null;
+  const lastC = knownC[knownC.length-1] ?? null, firstC = knownC[0] ?? null;
+
+  const weeksInRange = Math.max(1, Math.round(EVO_RANGE/7));
+  const sportDaysInRange = dates.filter(d=>DATA.entries[dateKey(d)]?.sport?.done).length;
+  const totalMinutes = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.sport?.done?(DATA.entries[dateKey(d)].sport.duration||0):0),0);
+  const totalCalories = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.sport?.done?(DATA.entries[dateKey(d)].sport.calories||0):0),0);
+  const physioSessions = dates.filter(d=>DATA.entries[dateKey(d)]?.physio?.done).length;
+  const physioMinutes = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.physio?.done?(DATA.entries[dateKey(d)].physio.duration||0):0),0);
+  const physioGoalTotal = DATA.config.physioGoalEnabled ? DATA.config.physioWeeklyGoal*weeksInRange : null;
+
+  return `
+    <div class="head-row"><h1 class="title" style="margin-bottom:0;">Evolución</h1>
+      <div class="range-toggle">${[7,30,90].map(r=>`<button data-range="${r}" class="${EVO_RANGE===r?"active":""}">${r}d</button>`).join("")}</div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Peso</h3></div>
+      <div class="weight-row"><span>Último: <b>${lastW!=null?lastW+" kg":"—"}</b></span><span>Variación: <b>${(firstW!=null&&lastW!=null)?((lastW-firstW>=0?"+":"")+(lastW-firstW).toFixed(1)+" kg"):"—"}</b></span></div>
+      <canvas class="chart" id="chart-weight" height="160"></canvas>
+      <p class="legend-note">Línea sólida: peso · línea punteada: promedio móvil de 7 días</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Cintura</h3></div>
+      <div class="weight-row"><span>Última: <b>${lastC!=null?lastC+" cm":"—"}</b></span><span>Variación: <b>${(firstC!=null&&lastC!=null)?((lastC-firstC>=0?"+":"")+(lastC-firstC).toFixed(1)+" cm"):"—"}</b></span></div>
+      <canvas class="chart" id="chart-waist" height="140"></canvas>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Adherencia semanal (últimas 8 semanas)</h3></div>
+      <canvas class="chart" id="chart-adh" height="140"></canvas>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Deporte</h3></div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="l">Días activos</div><div class="v">${sportDaysInRange}</div></div>
+        <div class="stat-box"><div class="l">Min. totales</div><div class="v">${totalMinutes}</div></div>
+        <div class="stat-box"><div class="l">Calorías</div><div class="v">${totalCalories}</div></div>
+        <div class="stat-box"><div class="l">Días/semana</div><div class="v">${(sportDaysInRange/weeksInRange).toFixed(1)}</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Fisioterapia</h3></div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="l">Sesiones</div><div class="v">${physioSessions}</div></div>
+        <div class="stat-box"><div class="l">Minutos</div><div class="v">${physioMinutes}</div></div>
+        ${physioGoalTotal!=null?`<div class="stat-box"><div class="l">Objetivo periodo</div><div class="v">${physioSessions}/${physioGoalTotal}</div></div>`:""}
+      </div>
+    </div>
+  `;
+}
+
+function drawLineChart(canvas, series, opts){
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight || parseInt(canvas.getAttribute("height"));
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  const allVals = series.flatMap(s=>s.data.filter(v=>v!=null));
+  if (!allVals.length){ ctx.fillStyle = opts.sub||"#999"; ctx.font="12px sans-serif"; ctx.fillText("Sin datos suficientes", 8, h/2); return; }
+  const min = Math.min(...allVals), max = Math.max(...allVals);
+  const pad = (max-min)*0.15 || 1;
+  const yMin = min-pad, yMax = max+pad;
+  const n = series[0].data.length;
+  const left=30, right=6, top=8, bottom=8;
+  const x = (i) => left + (i/(n-1||1))*(w-left-right);
+  const y = (v) => top + (1-((v-yMin)/((yMax-yMin)||1)))*(h-top-bottom);
+  ctx.strokeStyle = opts.grid || "#eee"; ctx.lineWidth=1;
+  for (let g=0; g<=3; g++){ const gy = top + (g/3)*(h-top-bottom); ctx.beginPath(); ctx.moveTo(left,gy); ctx.lineTo(w-right,gy); ctx.stroke(); }
+  ctx.fillStyle = opts.axis || "#999"; ctx.font="10px -apple-system,sans-serif"; ctx.textAlign="right";
+  ctx.fillText(yMax.toFixed(1), left-4, top+8);
+  ctx.fillText(yMin.toFixed(1), left-4, h-bottom);
+  series.forEach(s => {
+    ctx.beginPath();
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width||2;
+    if (s.dashed) ctx.setLineDash([4,3]); else ctx.setLineDash([]);
+    let started=false;
+    s.data.forEach((v,i) => { if(v==null) return; const px=x(i), py=y(v); if(!started){ctx.moveTo(px,py);started=true;} else ctx.lineTo(px,py); });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+}
+function drawBarChart(canvas, labels, values, colorFn, opts){
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight || parseInt(canvas.getAttribute("height"));
+  canvas.width = w*dpr; canvas.height = h*dpr; ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,w,h);
+  const left=26, right=6, top=8, bottom=18;
+  const bw = (w-left-right)/values.length;
+  ctx.fillStyle = opts.axis||"#999"; ctx.font="10px -apple-system,sans-serif"; ctx.textAlign="center";
+  values.forEach((v,i) => {
+    const bh = ((h-top-bottom)*Math.max(0,Math.min(100,v)))/100;
+    const bx = left + i*bw + bw*0.15, bw2 = bw*0.7;
+    ctx.fillStyle = colorFn(v);
+    const by = h-bottom-bh;
+    const r = Math.min(6, bw2/2);
+    ctx.beginPath();
+    ctx.moveTo(bx, h-bottom);
+    ctx.lineTo(bx, by+r);
+    ctx.arcTo(bx, by, bx+r, by, r);
+    ctx.lineTo(bx+bw2-r, by);
+    ctx.arcTo(bx+bw2, by, bx+bw2, by+r, r);
+    ctx.lineTo(bx+bw2, h-bottom);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = opts.axis||"#999";
+    ctx.fillText(labels[i], bx+bw2/2, h-4);
+  });
+}
+function drawCharts(){
+  const dates = [];
+  for (let i=EVO_RANGE-1;i>=0;i--) dates.push(addDays(new Date(),-i));
+  const weightSeries = dates.map(d=>DATA.entries[dateKey(d)]?.weight ?? null);
+  const waistSeries = dates.map(d=>DATA.entries[dateKey(d)]?.waist ?? null);
+  const weightMA = movingAvg(weightSeries,7);
+  const dark = document.documentElement.classList.contains("dark");
+  const grid = dark?"#2a2a2a":"#eee", axis = dark?"#888":"#999";
+
+  const wc = document.getElementById("chart-weight");
+  if (wc) drawLineChart(wc, [
+    {data:weightSeries, color:COLORS.weight, width:1.5},
+    {data:weightMA, color:COLORS.sport, width:2, dashed:false},
+  ], {grid,axis});
+
+  const cc = document.getElementById("chart-waist");
+  if (cc) drawLineChart(cc, [{data:waistSeries, color:COLORS.physio, width:2}], {grid,axis});
+
+  const ac = document.getElementById("chart-adh");
+  if (ac) {
+    const weeks = []; const labels=[];
+    for (let i=7;i>=0;i--){ const wd=weekDates(addDays(new Date(),-7*i)); const adh=computeWeekAdherence(DATA.entries,wd,DATA.config); weeks.push(adh.total); labels.push(fmtShort(wd[0])); }
+    drawBarChart(ac, labels, weeks, v => v>=70?COLORS.sport:v>=40?COLORS.food:COLORS.bad, {axis});
+  }
+}
+
+function renderSettings(){
+  const cfg = DATA.config;
+  return `
+    <h1 class="title">Ajustes</h1>
+    ${DATA.isDemo ? `
+    <div class="card">
+      <div class="card-head"><h3>Datos de demostración</h3></div>
+      <p class="small" style="margin-bottom:10px;">Estás usando datos ficticios para explorar la app.</p>
+      <button class="btn primary" id="clear-demo">Borrar datos demo y comenzar</button>
+    </div>`:""}
+    <div class="card">
+      <div class="card-head"><h3>Apariencia</h3></div>
+      <div class="grid2" style="grid-template-columns:1fr 1fr 1fr;">
+        ${[["system","Sistema"],["light","Claro"],["dark","Oscuro"]].map(([v,l])=>`<button class="chip${cfg.theme===v?" active":""}" data-theme="${v}" style="${cfg.theme===v?`background:${COLORS.sport};border-color:${COLORS.sport};`:""}">${l}</button>`).join("")}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Ponderación de adherencia</h3></div>
+      ${["food","sport","physio"].map(k=>`
+        <div class="weight-slider" style="margin-bottom:12px;">
+          <div class="summary-row" style="padding:0 0 4px;"><span>${k==="food"?"Alimentación":k==="sport"?"Deporte":"Fisioterapia"}</span><span><b>${cfg.weights[k]}%</b></span></div>
+          <input type="range" min="0" max="100" value="${cfg.weights[k]}" data-weight="${k}"/>
+        </div>`).join("")}
+      <p class="small">Fórmula: puntaje semanal = (alimentación × peso_alim + deporte × peso_dep + fisio × peso_fisio) / suma de pesos activos. Alimentación promedia el puntaje de almuerzos y cenas registrados (OK/liviana=100, regular/normal=50, no adecuado/excesiva=0; sin registrar no cuenta). Deporte = (días con deporte / 7) × 100. Fisioterapia = (sesiones de la semana / objetivo semanal) × 100, tope 100. Si una categoría no tiene objetivo o datos esa semana, su peso se redistribuye entre las demás. Peso y cintura nunca afectan este puntaje.</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Fisioterapia — objetivo</h3></div>
+      <div class="summary-row"><span>Incluir en el puntaje</span><button class="toggle${cfg.physioGoalEnabled?" on":""}" id="physio-toggle"><div class="knob"></div></button></div>
+      ${cfg.physioGoalEnabled?`<div class="summary-row"><span>Sesiones por semana</span><input class="pill-input" type="number" min="1" max="14" id="physio-goal" value="${cfg.physioWeeklyGoal}"/></div>`:""}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Deportes personalizados</h3></div>
+      <div>${DATA.customSports.map(s=>`<span class="tag">${esc(s)}<button data-remove-sport="${esc(s)}">✕</button></span>`).join("")}</div>
+      <div class="row-gap">
+        <input class="text-field" id="new-sport" placeholder="Nuevo deporte"/>
+        <button class="btn primary" style="width:auto;padding:10px 16px;" id="add-sport">+</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Datos</h3></div>
+      <div class="grid2">
+        <button class="btn ghost" id="export-json">Backup JSON</button>
+        <button class="btn ghost" id="export-csv">Exportar CSV</button>
+      </div>
+      <div id="export-area"></div>
+      <button class="btn ghost" style="margin-top:8px;" id="show-import">Importar / restaurar backup JSON</button>
+      <div id="import-area"></div>
+      <button class="btn danger-text" style="margin-top:8px;" id="show-delete">Borrar todos los datos</button>
+      <div id="delete-area"></div>
+    </div>
+    <p class="footer-note">Balance — todos los datos se guardan solo en este dispositivo (IndexedDB), nunca se envían a un servidor.</p>
+  `;
+}
+
+function renderNav(){
+  const items = [
+    {id:"today",label:"Hoy",icon:'<path d="M3 9.5 12 3l9 6.5V21a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>'},
+    {id:"calendar",label:"Calendario",icon:'<rect x="3" y="5" width="18" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 3v4M16 3v4M3 10h18" stroke="currentColor" stroke-width="1.8"/>'},
+    {id:"evolution",label:"Evolución",icon:'<path d="M3 17l6-6 4 4 8-9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'},
+    {id:"settings",label:"Ajustes",icon:'<circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.3.9a7 7 0 0 0-2-1.2L14 3h-4l-.6 2.5a7 7 0 0 0-2 1.2l-2.3-.9-2 3.4 2 1.6a7 7 0 0 0 0 2.4l-2 1.6 2 3.4 2.3-.9a7 7 0 0 0 2 1.2L10 21h4l.6-2.5a7 7 0 0 0 2-1.2l2.3.9 2-3.4-2-1.6c.07-.4.1-.8.1-1.2Z" fill="none" stroke="currentColor" stroke-width="1.4"/>'},
+  ];
+  return `<nav class="bottom"><div class="inner">${items.map(it=>`
+    <button data-nav="${it.id}" class="${VIEW===it.id?"active":""}">
+      <svg viewBox="0 0 24 24">${it.icon}</svg>${it.label}
+    </button>`).join("")}</div></nav>`;
+}
+
+/* -------------------------------- handlers -------------------------------- */
+function setField(prefix, path, value){
+  const key = prefix==="today" ? todayKey() : MODAL_DATE;
+  const parts = path.split(".");
+  const entry = { ...emptyEntry(), ...(DATA.entries[key]||{}) };
+  if (parts.length===1){
+    entry[parts[0]] = value;
+  } else {
+    const [obj, field] = parts;
+    entry[obj] = { ...(entry[obj]||{}), [field]: value };
+  }
+  DATA.entries[key] = entry;
+  persist();
+}
+
+function attachHandlers(sportsList){
+  // nav
+  app.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => { VIEW = b.dataset.nav; render(); });
+  // chips (lunch/dinner)
+  app.querySelectorAll("[data-chip]").forEach(b => b.onclick = () => {
+    const [prefix, field] = b.dataset.chip.split(".");
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const cur = DATA.entries[key]?.[field];
+    setField(prefix, field, cur===b.dataset.val ? null : b.dataset.val);
+    render();
+  });
+  // sport toggle
+  app.querySelectorAll("[data-toggle-sport]").forEach(b => b.onclick = () => {
+    const prefix = b.dataset.toggleSport;
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const cur = DATA.entries[key]?.sport;
+    setField(prefix, "sport", cur?.done ? {done:false,type:"",duration:null,calories:null,intensity:null,comment:""} : {done:true,type:sportsList[0],duration:30,calories:null,intensity:null,comment:""});
+    render();
+  });
+  // physio toggle
+  app.querySelectorAll("[data-toggle-physio]").forEach(b => b.onclick = () => {
+    const prefix = b.dataset.togglePhysio;
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const cur = DATA.entries[key]?.physio;
+    setField(prefix, "physio", cur?.done ? {done:false,duration:null,comment:""} : {done:true,duration:20,comment:""});
+    render();
+  });
+  // intensity
+  app.querySelectorAll("[data-intensity]").forEach(b => b.onclick = () => {
+    const prefix = b.dataset.intensity.split(".")[0];
+    const objPath = b.dataset.intensity;
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const [pfx, field] = objPath.split(".");
+    const cur = DATA.entries[key]?.[field];
+    setField(pfx, objPath, cur?.intensity===b.dataset.val ? {...cur,intensity:null} : {...cur,intensity:b.dataset.val});
+    render();
+  });
+  // generic text/number fields (no full re-render, to keep focus while typing)
+  app.querySelectorAll("[data-field]").forEach(inp => {
+    inp.oninput = () => {
+      const path = inp.dataset.field; // e.g. "today.weight" or "today.sport.duration"
+      const [prefix, ...rest] = path.split(".");
+      const field = rest.join(".");
+      let val = inp.value;
+      if (inp.type==="number") val = val===""?null:parseFloat(val);
+      setField(prefix, field, val);
+    };
+  });
+  // calendar
+  app.querySelectorAll("[data-cal-nav]").forEach(b => b.onclick = () => {
+    const d = parseInt(b.dataset.calNav);
+    CAL_CURSOR = new Date(CAL_CURSOR.getFullYear(), CAL_CURSOR.getMonth()+d, 1);
+    render();
+  });
+  app.querySelectorAll("[data-day]").forEach(b => b.onclick = () => { MODAL_DATE = b.dataset.day; render(); });
+  // evolution range
+  app.querySelectorAll("[data-range]").forEach(b => b.onclick = () => { EVO_RANGE = parseInt(b.dataset.range); render(); });
+  // modal close
+  const closeBtn = document.getElementById("modal-close");
+  const backdrop = document.getElementById("modal-backdrop");
+  if (closeBtn) closeBtn.onclick = () => { MODAL_DATE = null; render(); };
+  if (backdrop) backdrop.onclick = () => { MODAL_DATE = null; render(); };
+
+  // settings
+  const clearDemo = document.getElementById("clear-demo");
+  if (clearDemo) clearDemo.onclick = () => { DATA.isDemo=false; DATA.entries={}; persist(); render(); };
+  app.querySelectorAll("[data-theme]").forEach(b => b.onclick = () => { DATA.config.theme=b.dataset.theme; persist(); render(); });
+  app.querySelectorAll("[data-weight]").forEach(inp => inp.oninput = () => {
+    const k = inp.dataset.weight; const val = parseInt(inp.value);
+    const others = ["food","sport","physio"].filter(x=>x!==k);
+    const remaining = 100-val;
+    const othersTotal = others.reduce((a,o)=>a+DATA.config.weights[o],0) || 1;
+    const nw = {...DATA.config.weights, [k]:val};
+    others.forEach(o => { nw[o] = Math.round((DATA.config.weights[o]/othersTotal)*remaining); });
+    DATA.config.weights = nw; persist(); render();
+  });
+  const physioToggle = document.getElementById("physio-toggle");
+  if (physioToggle) physioToggle.onclick = () => { DATA.config.physioGoalEnabled = !DATA.config.physioGoalEnabled; persist(); render(); };
+  const physioGoal = document.getElementById("physio-goal");
+  if (physioGoal) physioGoal.oninput = () => { DATA.config.physioWeeklyGoal = parseInt(physioGoal.value)||1; persist(); };
+  const addSportBtn = document.getElementById("add-sport");
+  if (addSportBtn) addSportBtn.onclick = () => {
+    const inp = document.getElementById("new-sport");
+    if (inp.value.trim()){ DATA.customSports.push(inp.value.trim()); persist(); render(); }
+  };
+  app.querySelectorAll("[data-remove-sport]").forEach(b => b.onclick = () => {
+    DATA.customSports = DATA.customSports.filter(s => s!==b.dataset.removeSport); persist(); render();
+  });
+
+  const exportJsonBtn = document.getElementById("export-json");
+  if (exportJsonBtn) exportJsonBtn.onclick = () => {
+    const json = JSON.stringify(DATA, null, 2);
+    downloadFile(`balance-backup-${todayKey()}.json`, json, "application/json");
+    document.getElementById("export-area").innerHTML = `<p class="small" style="margin-top:6px;">Si la descarga no se abrió, copiá el texto:</p><textarea readonly style="height:96px;font-family:monospace;font-size:10px;">${esc(json)}</textarea>`;
+  };
+  const exportCsvBtn = document.getElementById("export-csv");
+  if (exportCsvBtn) exportCsvBtn.onclick = () => {
+    const rows = [["fecha","almuerzo","cena","deporte_hecho","deporte_tipo","deporte_min","deporte_kcal","deporte_intensidad","fisio_hecho","fisio_min","peso","cintura"]];
+    Object.keys(DATA.entries).sort().forEach(k => {
+      const e = DATA.entries[k];
+      rows.push([k, e.lunch||"", e.dinner||"", e.sport?.done?"si":"no", e.sport?.type||"", e.sport?.duration??"", e.sport?.calories??"", e.sport?.intensity||"", e.physio?.done?"si":"no", e.physio?.duration??"", e.weight??"", e.waist??""]);
+    });
+    const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    downloadFile(`balance-export-${todayKey()}.csv`, csv, "text/csv");
+    document.getElementById("export-area").innerHTML = `<p class="small" style="margin-top:6px;">Si la descarga no se abrió, copiá el texto:</p><textarea readonly style="height:96px;font-family:monospace;font-size:10px;">${esc(csv)}</textarea>`;
+  };
+  const showImportBtn = document.getElementById("show-import");
+  if (showImportBtn) showImportBtn.onclick = () => {
+    document.getElementById("import-area").innerHTML = `
+      <input type="file" accept="application/json" id="import-file"/>
+      <textarea id="import-text" placeholder="O pegá aquí el contenido del JSON…" style="height:96px;font-family:monospace;font-size:10px;margin-top:6px;"></textarea>
+      <button class="btn primary" style="margin-top:6px;" id="do-import">Restaurar</button>`;
+    document.getElementById("import-file").onchange = (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const r = new FileReader(); r.onload = () => { document.getElementById("import-text").value = String(r.result); };
+      r.readAsText(f);
+    };
+    document.getElementById("do-import").onclick = () => {
+      try {
+        const parsed = JSON.parse(document.getElementById("import-text").value);
+        if (!parsed.entries || !parsed.config) throw new Error("bad format");
+        DATA = parsed; persist(); render();
+      } catch(err) { alert("El JSON no tiene el formato esperado de un backup de Balance."); }
+    };
+  };
+  const showDeleteBtn = document.getElementById("show-delete");
+  if (showDeleteBtn) showDeleteBtn.onclick = () => {
+    document.getElementById("delete-area").innerHTML = `
+      <div class="card" style="background:var(--card-alt);margin-top:8px;">
+        <p class="small" style="margin-bottom:8px;">Esto borra todo permanentemente. ¿Confirmás?</p>
+        <div class="row-gap"><button class="btn ghost" id="cancel-delete">Cancelar</button><button class="btn" style="background:${COLORS.bad};color:#fff;" id="confirm-delete">Borrar</button></div>
+      </div>`;
+    document.getElementById("cancel-delete").onclick = () => { document.getElementById("delete-area").innerHTML = ""; };
+    document.getElementById("confirm-delete").onclick = () => { DATA = defaultData(); persist(); render(); };
+  };
+}
+
+function downloadFile(filename, content, mime){
+  try {
+    const blob = new Blob([content], {type: mime});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  } catch(e){ console.error(e); }
+}
+
+/* ------------------------------ service worker ------------------------------ */
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(()=>{}); });
+}
+
+boot();
+})();
