@@ -178,10 +178,23 @@ let EVO_RANGE = 30;
 let MODAL_DATE = null;
 let saveTimer = null;
 
+let pendingSave = false;
 function persist(){
+  pendingSave = true;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { idbSet(KEY, DATA); }, 150);
+  saveTimer = setTimeout(flushSave, 250);
 }
+function flushSave(){
+  if (!pendingSave) return;
+  clearTimeout(saveTimer);
+  pendingSave = false;
+  idbSet(KEY, DATA).catch((e) => console.error("save failed", e));
+}
+// Safety net: if the app is backgrounded, closed, or loses focus before the
+// debounce timer fires, flush immediately so nothing typed gets lost.
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushSave(); });
+window.addEventListener("pagehide", flushSave);
+window.addEventListener("blur", flushSave);
 function updateEntry(key, patch){
   const cur = DATA.entries[key] || emptyEntry();
   DATA.entries[key] = { ...emptyEntry(), ...cur, ...patch };
@@ -238,12 +251,17 @@ function ringSVG(score, size=56){
     </svg><div class="num">${score}</div></div>`;
 }
 
-function chipRowHTML(options, value, group, colorFn){
-  return `<div class="chip-row">${options.map(o => {
+function chipRowHTML(options, value, group, colorFn, includeUnset){
+  let inner = options.map(o => {
     const active = value===o.v;
     const c = colorFn(o.v);
     return `<button class="chip${active?" active":""}" data-chip="${group}" data-val="${o.v}" style="${active?`background:${c};border-color:${c};`:""}">${o.label}</button>`;
-  }).join("")}</div>`;
+  }).join("");
+  if (includeUnset) {
+    const active = value==null;
+    inner += `<button class="chip${active?" active":""}" data-chip="${group}" data-val="__unset__" style="${active?"background:#8886;border-color:transparent;":""}">Sin registrar</button>`;
+  }
+  return `<div class="chip-row">${inner}</div>`;
 }
 
 function sportFieldsHTML(sport, sportsList, prefix){
@@ -270,11 +288,11 @@ function dayFormHTML(entry, sportsList, prefix){
   return `
     <div class="card">
       <div class="card-head"><h3>Almuerzo</h3></div>
-      ${chipRowHTML(LUNCH_OPTS, entry.lunch, prefix+".lunch", v => v==="ok"?COLORS.sport:v==="regular"?COLORS.food:COLORS.bad)}
+      ${chipRowHTML(LUNCH_OPTS, entry.lunch, prefix+".lunch", v => v==="ok"?COLORS.sport:v==="regular"?COLORS.food:COLORS.bad, true)}
     </div>
     <div class="card">
       <div class="card-head"><h3>Cena</h3></div>
-      ${chipRowHTML(DINNER_OPTS, entry.dinner, prefix+".dinner", v => v==="light"?COLORS.sport:v==="normal"?COLORS.food:COLORS.bad)}
+      ${chipRowHTML(DINNER_OPTS, entry.dinner, prefix+".dinner", v => v==="light"?COLORS.sport:v==="normal"?COLORS.food:COLORS.bad, true)}
     </div>
     <div class="card">
       <div class="card-head"><h3>Deporte</h3><button class="mark-btn${sport.done?" active":""}" data-toggle-sport="${prefix}">${sport.done?"Hecho":"Marcar"}</button></div>
@@ -599,9 +617,8 @@ function attachHandlers(sportsList){
   // chips (lunch/dinner)
   app.querySelectorAll("[data-chip]").forEach(b => b.onclick = () => {
     const [prefix, field] = b.dataset.chip.split(".");
-    const key = prefix==="today"?todayKey():MODAL_DATE;
-    const cur = DATA.entries[key]?.[field];
-    setField(prefix, field, cur===b.dataset.val ? null : b.dataset.val);
+    const val = b.dataset.val === "__unset__" ? null : b.dataset.val;
+    setField(prefix, field, val);
     render();
   });
   // sport toggle
@@ -622,17 +639,16 @@ function attachHandlers(sportsList){
   });
   // intensity
   app.querySelectorAll("[data-intensity]").forEach(b => b.onclick = () => {
-    const prefix = b.dataset.intensity.split(".")[0];
-    const objPath = b.dataset.intensity;
-    const key = prefix==="today"?todayKey():MODAL_DATE;
-    const [pfx, field] = objPath.split(".");
-    const cur = DATA.entries[key]?.[field];
-    setField(pfx, objPath, cur?.intensity===b.dataset.val ? {...cur,intensity:null} : {...cur,intensity:b.dataset.val});
+    const [pfx, field] = b.dataset.intensity.split("."); // e.g. "today.sport" -> pfx="today", field="sport"
+    const key = pfx==="today"?todayKey():MODAL_DATE;
+    const cur = DATA.entries[key]?.[field] || {};
+    const newIntensity = cur.intensity===b.dataset.val ? null : b.dataset.val;
+    setField(pfx, field, { ...cur, intensity: newIntensity });
     render();
   });
-  // generic text/number fields (no full re-render, to keep focus while typing)
+  // generic text/number/select fields (no full re-render, to keep focus while typing)
   app.querySelectorAll("[data-field]").forEach(inp => {
-    inp.oninput = () => {
+    const handler = () => {
       const path = inp.dataset.field; // e.g. "today.weight" or "today.sport.duration"
       const [prefix, ...rest] = path.split(".");
       const field = rest.join(".");
@@ -640,6 +656,8 @@ function attachHandlers(sportsList){
       if (inp.type==="number") val = val===""?null:parseFloat(val);
       setField(prefix, field, val);
     };
+    inp.oninput = handler;
+    inp.onchange = handler; // fallback: some mobile browsers don't fire "input" reliably on <select>
   });
   // calendar
   app.querySelectorAll("[data-cal-nav]").forEach(b => b.onclick = () => {
