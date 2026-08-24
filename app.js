@@ -50,7 +50,8 @@ const addDays = (d,n) => { const nd=new Date(d); nd.setDate(nd.getDate()+n); ret
 const startOfWeek = (d) => { const nd=new Date(d); const day=(nd.getDay()+6)%7; nd.setDate(nd.getDate()-day); nd.setHours(0,0,0,0); return nd; };
 const weekDates = (d) => { const s=startOfWeek(d); return Array.from({length:7},(_,i)=>addDays(s,i)); };
 const fmtShort = (d) => d.toLocaleDateString("es-ES",{day:"2-digit",month:"short"});
-function emptyEntry(){ return {lunch:null,dinner:null,sport:null,physio:null,weight:null,waist:null}; }
+function emptyEntry(){ return {lunch:null,dinner:null,sports:[],physio:null,weight:null,waist:null}; }
+function uid(){ return Math.random().toString(36).slice(2,9); }
 function movingAvg(arr,w){ return arr.map((_,i)=>{ const s=Math.max(0,i-w+1); const slice=arr.slice(s,i+1).filter(v=>v!=null); if(!slice.length) return null; return slice.reduce((a,b)=>a+b,0)/slice.length; }); }
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
@@ -84,13 +85,19 @@ function generateDemoData(days=60){
     const dinner = dinnerRoll<0.5?"light":dinnerRoll<0.82?"normal":"excessive";
     const sportRoll = Math.random();
     const sportDone = dow===0 ? sportRoll<0.3 : sportRoll<0.55;
-    const sport = sportDone ? {done:true, type:sports[Math.floor(Math.random()*sports.length)], duration:[20,30,40,45,60][Math.floor(Math.random()*5)], calories:Math.round(150+Math.random()*400), intensity:INTENSITY_OPTS[Math.floor(Math.random()*3)], comment:""} : {done:false,type:"",duration:null,calories:null,intensity:null,comment:""};
+    const sportsArr = [];
+    if (sportDone) {
+      sportsArr.push({ id:uid(), type:sports[Math.floor(Math.random()*sports.length)], duration:[20,30,40,45,60][Math.floor(Math.random()*5)], calories:Math.round(150+Math.random()*400), intensity:INTENSITY_OPTS[Math.floor(Math.random()*3)], comment:"" });
+      if (Math.random() < 0.12) {
+        sportsArr.push({ id:uid(), type:sports[Math.floor(Math.random()*sports.length)], duration:[15,20,30][Math.floor(Math.random()*3)], calories:Math.round(80+Math.random()*200), intensity:INTENSITY_OPTS[Math.floor(Math.random()*3)], comment:"" });
+      }
+    }
     const physioDone = Math.random()<0.3;
     const physio = physioDone ? {done:true,duration:20,comment:""} : {done:false,duration:null,comment:""};
     weight += (Math.random()-0.56)*0.15;
     waist += (Math.random()-0.54)*0.1;
     entries[k] = {
-      lunch, dinner, sport, physio,
+      lunch, dinner, sports: sportsArr, physio,
       weight: i%3===0 ? Math.round(weight*10)/10 : null,
       waist: i%9===0 ? Math.round(waist*10)/10 : null,
     };
@@ -102,8 +109,32 @@ function defaultData(){
     isDemo: true,
     entries: generateDemoData(60),
     customSports: [],
-    config: { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system" },
+    config: { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null, waist:null} },
   };
+}
+
+/* -------------------------- migration (old data shapes) -------------------------- */
+function migrateEntry(e){
+  if (!e) return emptyEntry();
+  const out = { ...emptyEntry(), ...e };
+  if (!Array.isArray(e.sports)) {
+    if (e.sport && e.sport.done) {
+      out.sports = [{ id:uid(), type:e.sport.type||"", duration:e.sport.duration??null, calories:e.sport.calories??null, intensity:e.sport.intensity??null, comment:e.sport.comment||"" }];
+    } else {
+      out.sports = [];
+    }
+  }
+  delete out.sport;
+  return out;
+}
+function migrateData(data){
+  if (!data) return defaultData();
+  const entries = {};
+  Object.keys(data.entries||{}).forEach((k) => { entries[k] = migrateEntry(data.entries[k]); });
+  const config = { weights:{food:50,sport:30,physio:20}, physioGoalEnabled:true, physioWeeklyGoal:2, theme:"system", goals:{weight:null,waist:null}, ...(data.config||{}) };
+  config.goals = { weight:null, waist:null, ...(data.config?.goals||{}) };
+  config.weights = { food:50, sport:30, physio:20, ...(data.config?.weights||{}) };
+  return { isDemo: !!data.isDemo, customSports: data.customSports||[], entries, config };
 }
 
 /* ---------------------------- adherence / stats ---------------------------- */
@@ -113,7 +144,7 @@ function computeWeekAdherence(entries, dates, config){
   const dinnerScores = days.map(e => e&&e.dinner ? DINNER_OPTS.find(o=>o.v===e.dinner).score : null).filter(v=>v!=null);
   const foodPool = [...lunchScores, ...dinnerScores];
   const foodScore = foodPool.length ? foodPool.reduce((a,b)=>a+b,0)/foodPool.length : null;
-  const sportDoneDays = days.filter(e=>e&&e.sport&&e.sport.done).length;
+  const sportDoneDays = days.filter(e=>e&&e.sports&&e.sports.length>0).length;
   const sportScore = (sportDoneDays/7)*100;
   let physioScore = null;
   if (config.physioGoalEnabled) {
@@ -132,9 +163,9 @@ function weekSummary(entries, dates){
   const days = dates.map(d => entries[dateKey(d)] || null);
   const lunchOk = days.filter(e=>e&&e.lunch==="ok").length;
   const dinnerLight = days.filter(e=>e&&e.dinner==="light").length;
-  const sportDays = days.filter(e=>e&&e.sport&&e.sport.done).length;
-  const minutes = days.reduce((a,e)=>a+(e&&e.sport&&e.sport.done?(e.sport.duration||0):0),0);
-  const calories = days.reduce((a,e)=>a+(e&&e.sport&&e.sport.done?(e.sport.calories||0):0),0);
+  const sportDays = days.filter(e=>e&&e.sports&&e.sports.length>0).length;
+  const minutes = days.reduce((a,e)=>a+((e&&e.sports)?e.sports.reduce((s,sp)=>s+(sp.duration||0),0):0),0);
+  const calories = days.reduce((a,e)=>a+((e&&e.sports)?e.sports.reduce((s,sp)=>s+(sp.calories||0),0):0),0);
   const physioSessions = days.filter(e=>e&&e.physio&&e.physio.done).length;
   const weights = days.map(e=>e&&e.weight).filter(v=>v!=null);
   const waists = days.map(e=>e&&e.waist).filter(v=>v!=null);
@@ -150,15 +181,15 @@ function generateInsights(data){
   if (allKeys.length < 7) return insights;
   const sortedDates = allKeys.map(parseKey).sort((a,b)=>a-b);
   let bestStreak=0, run=0;
-  for (const d of sortedDates){ const e=entries[dateKey(d)]; if(e&&e.sport&&e.sport.done){run++;bestStreak=Math.max(bestStreak,run);} else run=0; }
+  for (const d of sortedDates){ const e=entries[dateKey(d)]; if(e&&e.sports&&e.sports.length>0){run++;bestStreak=Math.max(bestStreak,run);} else run=0; }
   let curStreak=0, cd=new Date();
-  while(true){ const e=entries[dateKey(cd)]; if(e&&e.sport&&e.sport.done){curStreak++;cd=addDays(cd,-1);} else break; }
+  while(true){ const e=entries[dateKey(cd)]; if(e&&e.sports&&e.sports.length>0){curStreak++;cd=addDays(cd,-1);} else break; }
   if (curStreak>=3) insights.push(`Llevás ${curStreak} días seguidos haciendo deporte.`);
   if (bestStreak>=4) insights.push(`Tu mejor racha de deporte fue de ${bestStreak} días consecutivos.`);
   const now = new Date();
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const lastMonthStart = new Date(now.getFullYear(), now.getMonth()-1, 1);
-  const sumMin = (from,to) => sortedDates.filter(d=>d>=from&&d<to).reduce((a,d)=>{const e=entries[dateKey(d)]; return a+(e&&e.sport&&e.sport.done?(e.sport.duration||0):0);},0);
+  const sumMin = (from,to) => sortedDates.filter(d=>d>=from&&d<to).reduce((a,d)=>{const e=entries[dateKey(d)]; return a+((e&&e.sports)?e.sports.reduce((s,sp)=>s+(sp.duration||0),0):0);},0);
   const thisM = sumMin(thisMonthStart, addDays(now,1));
   const lastM = sumMin(lastMonthStart, thisMonthStart);
   if (lastM>0){ const pct=Math.round(((thisM-lastM)/lastM)*100); if(Math.abs(pct)>=10) insights.push(`Tus minutos de actividad ${pct>0?"aumentaron":"disminuyeron"} un ${Math.abs(pct)}% respecto del mes anterior.`); }
@@ -211,7 +242,7 @@ function applyTheme(){
 async function boot(){
   let stored = null;
   try { stored = await idbGet(KEY); } catch(e){ console.error(e); }
-  DATA = stored || defaultData();
+  DATA = migrateData(stored || defaultData());
   if (!stored) await idbSet(KEY, DATA);
   applyTheme();
   render();
@@ -264,15 +295,21 @@ function chipRowHTML(options, value, group, colorFn, includeUnset){
   return `<div class="chip-row">${inner}</div>`;
 }
 
-function sportFieldsHTML(sport, sportsList, prefix){
+function sportSessionHTML(sp, idx, sportsList, prefix){
+  const base = `${prefix}.sports.${idx}`;
   return `
-    <select data-field="${prefix}.type">${sportsList.map(s=>`<option value="${esc(s)}" ${sport.type===s?"selected":""}>${esc(s)}</option>`).join("")}</select>
-    <div class="row-gap">
-      <div class="num-field"><input type="number" inputmode="numeric" data-field="${prefix}.duration" value="${sport.duration??""}" placeholder="0"/><span>min</span></div>
-      <div class="num-field"><input type="number" inputmode="numeric" data-field="${prefix}.calories" value="${sport.calories??""}" placeholder="0"/><span>kcal</span></div>
+    <div style="background:var(--card-alt);border-radius:16px;padding:10px;margin-bottom:8px;">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:2px;">
+        <button data-remove-sport-idx="${prefix}|${idx}" style="background:none;border:none;color:var(--sub);font-size:12px;padding:2px 4px;">Quitar ✕</button>
+      </div>
+      <select data-field="${base}.type">${sportsList.map(s=>`<option value="${esc(s)}" ${sp.type===s?"selected":""}>${esc(s)}</option>`).join("")}</select>
+      <div class="row-gap">
+        <div class="num-field"><input type="number" inputmode="numeric" data-field="${base}.duration" value="${sp.duration??""}" placeholder="0"/><span>min</span></div>
+        <div class="num-field"><input type="number" inputmode="numeric" data-field="${base}.calories" value="${sp.calories??""}" placeholder="0"/><span>kcal</span></div>
+      </div>
+      <div class="intensity-row">${INTENSITY_OPTS.map(i=>`<button class="intensity-chip${sp.intensity===i?" active":""}" data-intensity="${base}" data-val="${i}">${i}</button>`).join("")}</div>
+      <input class="text-field" style="margin-top:8px;" data-field="${base}.comment" value="${esc(sp.comment||"")}" placeholder="Comentario (opcional)"/>
     </div>
-    <div class="intensity-row">${INTENSITY_OPTS.map(i=>`<button class="intensity-chip${sport.intensity===i?" active":""}" data-intensity="${prefix}" data-val="${i}">${i}</button>`).join("")}</div>
-    <input class="text-field" style="margin-top:8px;" data-field="${prefix}.comment" value="${esc(sport.comment||"")}" placeholder="Comentario (opcional)"/>
   `;
 }
 function physioFieldsHTML(physio, prefix){
@@ -283,7 +320,7 @@ function physioFieldsHTML(physio, prefix){
 }
 
 function dayFormHTML(entry, sportsList, prefix){
-  const sport = entry.sport || {done:false,type:"",duration:null,calories:null,intensity:null,comment:""};
+  const sports = entry.sports || [];
   const physio = entry.physio || {done:false,duration:null,comment:""};
   return `
     <div class="card">
@@ -295,8 +332,8 @@ function dayFormHTML(entry, sportsList, prefix){
       ${chipRowHTML(DINNER_OPTS, entry.dinner, prefix+".dinner", v => v==="light"?COLORS.sport:v==="normal"?COLORS.food:COLORS.bad, true)}
     </div>
     <div class="card">
-      <div class="card-head"><h3>Deporte</h3><button class="mark-btn${sport.done?" active":""}" data-toggle-sport="${prefix}">${sport.done?"Hecho":"Marcar"}</button></div>
-      ${sport.done ? sportFieldsHTML(sport, sportsList, prefix+".sport") : ""}
+      <div class="card-head"><h3>Deporte${sports.length?` (${sports.length})`:""}</h3><button class="mark-btn active" data-add-sport="${prefix}">+ Agregar</button></div>
+      ${sports.length ? sports.map((sp,idx)=>sportSessionHTML(sp,idx,sportsList,prefix)).join("") : `<p class="small">Sin actividad registrada.</p>`}
     </div>
     <div class="card">
       <div class="card-head"><h3>Fisioterapia</h3><button class="mark-btn physio${physio.done?" active":""}" data-toggle-physio="${prefix}">${physio.done?"Hecho":"Marcar"}</button></div>
@@ -357,7 +394,7 @@ function renderCalendar(){
       let dots = "";
       if (e?.lunch) dots += `<div class="dot-sm" style="background:${e.lunch==="ok"?COLORS.sport:e.lunch==="regular"?COLORS.food:COLORS.bad}"></div>`;
       if (e?.dinner) dots += `<div class="dot-sm" style="background:${e.dinner==="light"?COLORS.sport:e.dinner==="normal"?COLORS.food:COLORS.bad}"></div>`;
-      if (e?.sport?.done) dots += `<div class="dot-sm" style="background:${COLORS.sport}"></div>`;
+      if (e?.sports?.length) dots += `<div class="dot-sm" style="background:${COLORS.sport}"></div>`;
       if (e?.physio?.done) dots += `<div class="dot-sm" style="background:${COLORS.physio}"></div>`;
       if (e?.weight!=null || e?.waist!=null) dots += `<div class="dot-sm" style="background:${COLORS.weight}"></div>`;
       grid += `<button class="cal-day${inMonth?"":" out"}${isToday?" today":""}" data-day="${k}"><span class="n">${d.getDate()}</span><div class="dots">${dots}</div></button>`;
@@ -399,12 +436,15 @@ function renderEvolution(){
   const lastC = knownC[knownC.length-1] ?? null, firstC = knownC[0] ?? null;
 
   const weeksInRange = Math.max(1, Math.round(EVO_RANGE/7));
-  const sportDaysInRange = dates.filter(d=>DATA.entries[dateKey(d)]?.sport?.done).length;
-  const totalMinutes = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.sport?.done?(DATA.entries[dateKey(d)].sport.duration||0):0),0);
-  const totalCalories = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.sport?.done?(DATA.entries[dateKey(d)].sport.calories||0):0),0);
+  const sportDaysInRange = dates.filter(d=>(DATA.entries[dateKey(d)]?.sports||[]).length>0).length;
+  const totalMinutes = dates.reduce((a,d)=>a+((DATA.entries[dateKey(d)]?.sports||[]).reduce((s,sp)=>s+(sp.duration||0),0)),0);
+  const totalCalories = dates.reduce((a,d)=>a+((DATA.entries[dateKey(d)]?.sports||[]).reduce((s,sp)=>s+(sp.calories||0),0)),0);
   const physioSessions = dates.filter(d=>DATA.entries[dateKey(d)]?.physio?.done).length;
   const physioMinutes = dates.reduce((a,d)=>a+(DATA.entries[dateKey(d)]?.physio?.done?(DATA.entries[dateKey(d)].physio.duration||0):0),0);
   const physioGoalTotal = DATA.config.physioGoalEnabled ? DATA.config.physioWeeklyGoal*weeksInRange : null;
+  const goals = DATA.config.goals || {};
+  const weightGoalNote = (goals.weight!=null && lastW!=null) ? `Meta: ${goals.weight} kg (${Math.abs(lastW-goals.weight).toFixed(1)} kg ${lastW>goals.weight?"por encima":lastW<goals.weight?"por debajo":"— ¡cumplida!"})` : (goals.weight!=null ? `Meta: ${goals.weight} kg` : "");
+  const waistGoalNote = (goals.waist!=null && lastC!=null) ? `Meta: ${goals.waist} cm (${Math.abs(lastC-goals.waist).toFixed(1)} cm ${lastC>goals.waist?"por encima":lastC<goals.waist?"por debajo":"— ¡cumplida!"})` : (goals.waist!=null ? `Meta: ${goals.waist} cm` : "");
 
   return `
     <div class="head-row"><h1 class="title" style="margin-bottom:0;">Evolución</h1>
@@ -413,12 +453,14 @@ function renderEvolution(){
     <div class="card">
       <div class="card-head"><h3>Peso</h3></div>
       <div class="weight-row"><span>Último: <b>${lastW!=null?lastW+" kg":"—"}</b></span><span>Variación: <b>${(firstW!=null&&lastW!=null)?((lastW-firstW>=0?"+":"")+(lastW-firstW).toFixed(1)+" kg"):"—"}</b></span></div>
+      ${weightGoalNote?`<p class="legend-note" style="margin-top:-4px;">${weightGoalNote}</p>`:""}
       <canvas class="chart" id="chart-weight" height="160"></canvas>
       <p class="legend-note">Línea sólida: peso · línea punteada: promedio móvil de 7 días</p>
     </div>
     <div class="card">
       <div class="card-head"><h3>Cintura</h3></div>
       <div class="weight-row"><span>Última: <b>${lastC!=null?lastC+" cm":"—"}</b></span><span>Variación: <b>${(firstC!=null&&lastC!=null)?((lastC-firstC>=0?"+":"")+(lastC-firstC).toFixed(1)+" cm"):"—"}</b></span></div>
+      ${waistGoalNote?`<p class="legend-note" style="margin-top:-4px;">${waistGoalNote}</p>`:""}
       <canvas class="chart" id="chart-waist" height="140"></canvas>
     </div>
     <div class="card">
@@ -453,6 +495,7 @@ function drawLineChart(canvas, series, opts){
   ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,w,h);
   const allVals = series.flatMap(s=>s.data.filter(v=>v!=null));
+  if (opts.refLine!=null) allVals.push(opts.refLine);
   if (!allVals.length){ ctx.fillStyle = opts.sub||"#999"; ctx.font="12px sans-serif"; ctx.fillText("Sin datos suficientes", 8, h/2); return; }
   const min = Math.min(...allVals), max = Math.max(...allVals);
   const pad = (max-min)*0.15 || 1;
@@ -466,6 +509,13 @@ function drawLineChart(canvas, series, opts){
   ctx.fillStyle = opts.axis || "#999"; ctx.font="10px -apple-system,sans-serif"; ctx.textAlign="right";
   ctx.fillText(yMax.toFixed(1), left-4, top+8);
   ctx.fillText(yMin.toFixed(1), left-4, h-bottom);
+  if (opts.refLine!=null) {
+    const ry = y(opts.refLine);
+    ctx.strokeStyle = opts.refColor || "#8B7FD6"; ctx.lineWidth = 1.5;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(left, ry); ctx.lineTo(w-right, ry); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   series.forEach(s => {
     ctx.beginPath();
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width||2;
@@ -516,10 +566,10 @@ function drawCharts(){
   if (wc) drawLineChart(wc, [
     {data:weightSeries, color:COLORS.weight, width:1.5},
     {data:weightMA, color:COLORS.sport, width:2, dashed:false},
-  ], {grid,axis});
+  ], {grid,axis,refLine:DATA.config.goals?.weight ?? null});
 
   const cc = document.getElementById("chart-waist");
-  if (cc) drawLineChart(cc, [{data:waistSeries, color:COLORS.physio, width:2}], {grid,axis});
+  if (cc) drawLineChart(cc, [{data:waistSeries, color:COLORS.physio, width:2}], {grid,axis,refLine:DATA.config.goals?.waist ?? null});
 
   const ac = document.getElementById("chart-adh");
   if (ac) {
@@ -560,6 +610,14 @@ function renderSettings(){
       ${cfg.physioGoalEnabled?`<div class="summary-row"><span>Sesiones por semana</span><input class="pill-input" type="number" min="1" max="14" id="physio-goal" value="${cfg.physioWeeklyGoal}"/></div>`:""}
     </div>
     <div class="card">
+      <div class="card-head"><h3>Metas (informativas)</h3></div>
+      <p class="small" style="margin-bottom:8px;">No afectan el puntaje de adherencia — solo se muestran como referencia en Evolución.</p>
+      <div class="meas-grid">
+        <div><label class="field-label">Peso objetivo (kg)</label><input class="big-input" type="number" inputmode="decimal" step="0.1" id="goal-weight" value="${cfg.goals?.weight??""}" placeholder="—"/></div>
+        <div><label class="field-label">Cintura objetivo (cm)</label><input class="big-input" type="number" inputmode="decimal" step="0.1" id="goal-waist" value="${cfg.goals?.waist??""}" placeholder="—"/></div>
+      </div>
+    </div>
+    <div class="card">
       <div class="card-head"><h3>Deportes personalizados</h3></div>
       <div>${DATA.customSports.map(s=>`<span class="tag">${esc(s)}<button data-remove-sport="${esc(s)}">✕</button></span>`).join("")}</div>
       <div class="row-gap">
@@ -597,16 +655,25 @@ function renderNav(){
 }
 
 /* -------------------------------- handlers -------------------------------- */
+function setDeepField(obj, parts, value){
+  if (parts.length === 1) { obj[parts[0]] = value; return; }
+  const [head, ...rest] = parts;
+  if (Array.isArray(obj[head]) && /^\d+$/.test(rest[0])) {
+    const idx = parseInt(rest[0], 10);
+    const arr = obj[head].slice();
+    const item = { ...(arr[idx] || {}) };
+    setDeepField(item, rest.slice(1), value);
+    arr[idx] = item;
+    obj[head] = arr;
+    return;
+  }
+  obj[head] = { ...(obj[head] || {}) };
+  setDeepField(obj[head], rest, value);
+}
 function setField(prefix, path, value){
   const key = prefix==="today" ? todayKey() : MODAL_DATE;
-  const parts = path.split(".");
   const entry = { ...emptyEntry(), ...(DATA.entries[key]||{}) };
-  if (parts.length===1){
-    entry[parts[0]] = value;
-  } else {
-    const [obj, field] = parts;
-    entry[obj] = { ...(entry[obj]||{}), [field]: value };
-  }
+  setDeepField(entry, path.split("."), value);
   DATA.entries[key] = entry;
   persist();
 }
@@ -621,12 +688,25 @@ function attachHandlers(sportsList){
     setField(prefix, field, val);
     render();
   });
-  // sport toggle
-  app.querySelectorAll("[data-toggle-sport]").forEach(b => b.onclick = () => {
-    const prefix = b.dataset.toggleSport;
+  // add a sport session
+  app.querySelectorAll("[data-add-sport]").forEach(b => b.onclick = () => {
+    const prefix = b.dataset.addSport;
     const key = prefix==="today"?todayKey():MODAL_DATE;
-    const cur = DATA.entries[key]?.sport;
-    setField(prefix, "sport", cur?.done ? {done:false,type:"",duration:null,calories:null,intensity:null,comment:""} : {done:true,type:sportsList[0],duration:30,calories:null,intensity:null,comment:""});
+    const entry = { ...emptyEntry(), ...(DATA.entries[key]||{}) };
+    entry.sports = [...(entry.sports||[]), { id:uid(), type:sportsList[0], duration:30, calories:null, intensity:null, comment:"" }];
+    DATA.entries[key] = entry;
+    persist();
+    render();
+  });
+  // remove a sport session
+  app.querySelectorAll("[data-remove-sport-idx]").forEach(b => b.onclick = () => {
+    const [prefix, idxStr] = b.dataset.removeSportIdx.split("|");
+    const idx = parseInt(idxStr, 10);
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    const entry = { ...emptyEntry(), ...(DATA.entries[key]||{}) };
+    entry.sports = (entry.sports||[]).filter((_,i)=>i!==idx);
+    DATA.entries[key] = entry;
+    persist();
     render();
   });
   // physio toggle
@@ -637,19 +717,21 @@ function attachHandlers(sportsList){
     setField(prefix, "physio", cur?.done ? {done:false,duration:null,comment:""} : {done:true,duration:20,comment:""});
     render();
   });
-  // intensity
+  // intensity (sport sessions) — data-intensity is a path like "today.sports.0"
   app.querySelectorAll("[data-intensity]").forEach(b => b.onclick = () => {
-    const [pfx, field] = b.dataset.intensity.split("."); // e.g. "today.sport" -> pfx="today", field="sport"
-    const key = pfx==="today"?todayKey():MODAL_DATE;
-    const cur = DATA.entries[key]?.[field] || {};
-    const newIntensity = cur.intensity===b.dataset.val ? null : b.dataset.val;
-    setField(pfx, field, { ...cur, intensity: newIntensity });
+    const pathParts = b.dataset.intensity.split(".");
+    const prefix = pathParts[0];
+    const key = prefix==="today"?todayKey():MODAL_DATE;
+    let cur = DATA.entries[key] || {};
+    for (const p of pathParts.slice(1)) cur = cur?.[p];
+    const newIntensity = cur?.intensity===b.dataset.val ? null : b.dataset.val;
+    setField(prefix, [...pathParts.slice(1), "intensity"].join("."), newIntensity);
     render();
   });
   // generic text/number/select fields (no full re-render, to keep focus while typing)
   app.querySelectorAll("[data-field]").forEach(inp => {
     const handler = () => {
-      const path = inp.dataset.field; // e.g. "today.weight" or "today.sport.duration"
+      const path = inp.dataset.field; // e.g. "today.weight" or "today.sports.0.duration"
       const [prefix, ...rest] = path.split(".");
       const field = rest.join(".");
       let val = inp.value;
@@ -691,6 +773,10 @@ function attachHandlers(sportsList){
   if (physioToggle) physioToggle.onclick = () => { DATA.config.physioGoalEnabled = !DATA.config.physioGoalEnabled; persist(); render(); };
   const physioGoal = document.getElementById("physio-goal");
   if (physioGoal) physioGoal.oninput = () => { DATA.config.physioWeeklyGoal = parseInt(physioGoal.value)||1; persist(); };
+  const goalWeight = document.getElementById("goal-weight");
+  if (goalWeight) { const h = () => { DATA.config.goals = {...DATA.config.goals, weight: goalWeight.value===""?null:parseFloat(goalWeight.value)}; persist(); }; goalWeight.oninput = h; goalWeight.onchange = h; }
+  const goalWaist = document.getElementById("goal-waist");
+  if (goalWaist) { const h = () => { DATA.config.goals = {...DATA.config.goals, waist: goalWaist.value===""?null:parseFloat(goalWaist.value)}; persist(); }; goalWaist.oninput = h; goalWaist.onchange = h; }
   const addSportBtn = document.getElementById("add-sport");
   if (addSportBtn) addSportBtn.onclick = () => {
     const inp = document.getElementById("new-sport");
@@ -708,10 +794,15 @@ function attachHandlers(sportsList){
   };
   const exportCsvBtn = document.getElementById("export-csv");
   if (exportCsvBtn) exportCsvBtn.onclick = () => {
-    const rows = [["fecha","almuerzo","cena","deporte_hecho","deporte_tipo","deporte_min","deporte_kcal","deporte_intensidad","fisio_hecho","fisio_min","peso","cintura"]];
+    const rows = [["fecha","almuerzo","cena","deporte_tipo","deporte_min","deporte_kcal","deporte_intensidad","deporte_comentario","fisio_hecho","fisio_min","peso","cintura"]];
     Object.keys(DATA.entries).sort().forEach(k => {
       const e = DATA.entries[k];
-      rows.push([k, e.lunch||"", e.dinner||"", e.sport?.done?"si":"no", e.sport?.type||"", e.sport?.duration??"", e.sport?.calories??"", e.sport?.intensity||"", e.physio?.done?"si":"no", e.physio?.duration??"", e.weight??"", e.waist??""]);
+      const sessions = (e.sports && e.sports.length) ? e.sports : [null];
+      sessions.forEach((sp) => {
+        rows.push([k, e.lunch||"", e.dinner||"",
+          sp?.type||"", sp?.duration??"", sp?.calories??"", sp?.intensity||"", sp?.comment||"",
+          e.physio?.done?"si":"no", e.physio?.duration??"", e.weight??"", e.waist??""]);
+      });
     });
     const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
     downloadFile(`balance-export-${todayKey()}.csv`, csv, "text/csv");
@@ -732,7 +823,7 @@ function attachHandlers(sportsList){
       try {
         const parsed = JSON.parse(document.getElementById("import-text").value);
         if (!parsed.entries || !parsed.config) throw new Error("bad format");
-        DATA = parsed; persist(); render();
+        DATA = migrateData(parsed); persist(); render();
       } catch(err) { alert("El JSON no tiene el formato esperado de un backup de Balance."); }
     };
   };
