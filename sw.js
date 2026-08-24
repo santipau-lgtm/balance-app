@@ -1,11 +1,19 @@
-const CACHE = "balance-v3";
+const CACHE = "balance-v4";
 const ASSETS = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.json",
-  "./icons/icon-180.png", "./icons/icon-192.png", "./icons/icon-512.png",
+  "./icon-180.png", "./icon-192.png", "./icon-512.png",
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches.open(CACHE).then(async (c) => {
+      // Cache each asset independently: one missing/failed file must not
+      // abort the whole install (that's what left old versions stuck forever).
+      await Promise.all(ASSETS.map((url) =>
+        c.add(url).catch((err) => console.warn("SW: no se pudo cachear", url, err))
+      ));
+    }).then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener("activate", (event) => {
